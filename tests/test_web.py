@@ -308,3 +308,23 @@ def test_web_ficha_y_edicion_de_persona(servidor, ruta_astronauta, astronauta):
     _, r, _ = peticion(servidor, "DELETE", f"/api/muestras?id=Eileen%20Collins&clave={segunda}")
     assert r["resultado"]["quedan"] == 0
     assert peticion(servidor, "GET", "/api/personas")[1]["personas"] == []
+
+
+def test_web_dominio_del_tunel(tmp_path, monkeypatch, detector):
+    monkeypatch.delenv(VARIABLE_CLAVE, raising=False)
+    texto = (RAIZ_REPO / "config.yaml").read_text(encoding="utf-8")
+    texto = texto.replace("ruta: data/bd.csv", f"ruta: {tmp_path / 'bd.csv'}")
+    texto = texto.replace("ruta_clave: data/clave_hmac.key", f"ruta_clave: {tmp_path / 'k.key'}")
+    texto = texto.replace("modelo: models/", f"modelo: {RAIZ_REPO / 'models'}/")
+    (tmp_path / "config.yaml").write_text(texto, encoding="utf-8")
+    srv = crear_servidor(tmp_path / "config.yaml", "127.0.0.1", 0, ("trycloudflare.com",))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    puerto = srv.server_address[1]
+    try:
+        for host, esperado in (("abc-def.trycloudflare.com", 200), ("ABC.TryCloudflare.com", 200),
+                               ("localhost", 200), ("evil.com", 403), ("trycloudflare.com.evil.com", 403),
+                               ("eviltrycloudflare.com", 403)):
+            assert peticion(puerto, "GET", "/api/estado", cabeceras={"Host": host})[0] == esperado, host
+    finally:
+        srv.shutdown()
+        srv.server_close()

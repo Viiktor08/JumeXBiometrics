@@ -21,6 +21,10 @@ API (las fotos se envían como cuerpo binario de la petición, sin multipart):
 Los POST admiten `&caja=x,y,ancho,alto` (píxeles de la foto) para marcar la
 cara a mano cuando el detector no la encuentra o elige otra.
 
+Con --tunel se publica en una URL https://<algo>.trycloudflare.com mediante un
+túnel rápido de Cloudflare (cloudflared): el servidor sigue en este equipo y
+solo se acepta además ese dominio.
+
 Solo escucha en 127.0.0.1. Además, para que otra web abierta en el navegador
 no pueda usar la API (CSRF / DNS rebinding): se exige la cabecera
 `X-JumeX-Lens: 1` en los POST (obliga a un preflight CORS que nunca se aprueba)
@@ -33,6 +37,9 @@ import argparse
 import json
 import math
 import mimetypes
+import re
+import shutil
+import subprocess
 import threading
 import time
 import webbrowser
@@ -60,6 +67,8 @@ CONFIG_POR_DEFECTO = RAIZ_REPO / "config_lens.yaml"
 N_CANDIDATOS = 3
 LADO_RETRATO_GRUPO = 192
 HOSTS_PERMITIDOS = {"127.0.0.1", "localhost", "[::1]"}
+DOMINIO_TUNEL = "trycloudflare.com"
+PATRON_URL_TUNEL = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 
 
 class Aplicacion:
@@ -306,6 +315,7 @@ def _template_json(template) -> dict:
 class Manejador(BaseHTTPRequestHandler):
     server_version = "JumeXLens/1.0"
     app: Aplicacion  # se asigna al crear el servidor
+    dominios_extra: tuple[str, ...] = ()  # además de localhost (túnel)
 
     # ------------------------------------------------------------------ #
     def _enviar(self, estado: int, cuerpo: bytes, tipo: str, cache: bool = False) -> None:
@@ -335,8 +345,11 @@ class Manejador(BaseHTTPRequestHandler):
     def _host_valido(self) -> bool:
         host = self.headers.get("Host") or ""
         # "[::1]:8000" -> "[::1]"; "localhost:8000" -> "localhost"
-        nombre = host.split("]")[0] + "]" if host.startswith("[") else host.split(":")[0]
-        return nombre in HOSTS_PERMITIDOS
+        nombre = (host.split("]")[0] + "]" if host.startswith("[") else host.split(":")[0]).lower()
+        if nombre in HOSTS_PERMITIDOS:
+            return True
+        # Dominios extra (p. ej. el del túnel de Cloudflare): el propio o un subdominio
+        return any(nombre == d or nombre.endswith("." + d) for d in self.dominios_extra)
 
     def log_message(self, formato: str, *args) -> None:
         print(f"[{self.log_date_time_string()}] {formato % args}")
@@ -452,9 +465,10 @@ class Manejador(BaseHTTPRequestHandler):
         self._fallo(HTTPStatus.NOT_FOUND, "no_encontrado", f"No existe {ruta}")
 
 
-def crear_servidor(ruta_config: Path, host: str = "127.0.0.1", puerto: int = 8000) -> ThreadingHTTPServer:
+def crear_servidor(ruta_config: Path, host: str = "127.0.0.1", puerto: int = 8000,
+                   dominios_extra: tuple[str, ...] = ()) -> ThreadingHTTPServer:
     app = Aplicacion(ruta_config)
-    manejador = type("ManejadorLens", (Manejador,), {"app": app})
+    manejador = type("ManejadorLens", (Manejador,), {"app": app, "dominios_extra": tuple(dominios_extra)})
     servidor = ThreadingHTTPServer((host, puerto), manejador)
     servidor.daemon_threads = True
     return servidor
@@ -465,10 +479,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=CONFIG_POR_DEFECTO)
     parser.add_argument("--puerto", type=int, default=8000)
     parser.add_argument("--no-abrir", action="store_true", help="no abrir el navegador")
+    parser.add_argument("--tunel", action="store_true",
+                        help="publica la web con un túnel de Cloudflare (necesita cloudflared)")
     args = parser.parse_args(argv)
 
+    if args.tunel and shutil.which("cloudflared") is None:
+        print("No se encuentra cloudflared. En macOS: brew install cloudflared")
+        return 1
     try:
-        servidor = crear_servidor(args.config, "127.0.0.1", args.puerto)
+        servidor = crear_servidor(args.config, "127.0.0.1", args.puerto,
+                                  (DOMINIO_TUNEL,) if args.tunel else ())
     except ErrorBiometrico as e:
         print(f"Error [{e.codigo}]: {e.mensaje}")
         return 1
@@ -484,6 +504,7 @@ def main(argv: list[str] | None = None) -> int:
     if estado["personas"] == 0:
         print("La BD está vacía. Para cargar las 50 personas de LFW:\n"
               f"  python scripts/inscribir_csv.py data/lfw/personas.csv --config {args.config}")
+    tunel = abrir_tunel(url) if args.tunel else None
     print("Ctrl+C para parar.")
     if not args.no_abrir:
         threading.Timer(0.8, webbrowser.open, args=(url,)).start()
@@ -493,4 +514,33 @@ def main(argv: list[str] | None = None) -> int:
         print("\nServidor parado.")
     finally:
         servidor.server_close()
+        if tunel is not None:
+            tunel.terminate()
     return 0
+
+
+def abrir_tunel(url_local: str) -> subprocess.Popen:
+    """Arranca un túnel rápido de Cloudflare (sin cuenta) hacia el servidor local
+    y escribe la URL pública https://<algo>.trycloudflare.com en cuanto la recibe.
+
+    La URL cambia cada vez que se arranca y solo funciona mientras este proceso
+    siga abierto.
+    """
+    proceso = subprocess.Popen(
+        ["cloudflared", "tunnel", "--no-autoupdate", "--url", url_local],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+    )
+
+    def leer() -> None:
+        avisado = False
+        for linea in proceso.stderr:
+            encontrada = PATRON_URL_TUNEL.search(linea)
+            if encontrada and not avisado:
+                avisado = True
+                print(f"\n  URL pública (Cloudflare Tunnel): {encontrada.group(0)}\n"
+                      "  Cualquiera con esta URL puede usar la web y editar la base de datos.\n", flush=True)
+            elif "ERR" in linea and not avisado:
+                print(f"[cloudflared] {linea.strip()}", flush=True)
+
+    threading.Thread(target=leer, daemon=True).start()
+    return proceso

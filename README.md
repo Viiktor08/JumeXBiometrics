@@ -136,6 +136,19 @@ python scripts/inscribir_csv.py data/lfw/personas.csv --config config_lens.yaml 
 python -m biometria.web                                                 # abre http://127.0.0.1:8000
 ```
 
+**Publicarla en internet (Cloudflare Tunnel):**
+
+```bash
+brew install cloudflared            # una vez
+python -m biometria.web --tunel     # escribe la URL https://<algo>.trycloudflare.com
+```
+
+El servidor sigue en este equipo y Cloudflare reenvía las visitas: la web solo
+está online mientras el comando siga abierto, y la URL cambia cada vez que se
+arranca. **No tiene contraseña**: cualquiera con la URL puede ver las caras,
+inscribir y borrar. Se acepta solo el dominio `trycloudflare.com` además de
+localhost, y se sigue exigiendo la cabecera `X-JumeX-Lens`.
+
 - Usa [`config_lens.yaml`](config_lens.yaml): extractor **SFace** (red de OpenCV
   Zoo, referencia fuerte), BD propia en `data/lens/` y umbrales 0,68
   (verificación) y 0,70 (identificación). En 144 personas de LFW: EER 1,4 % y
