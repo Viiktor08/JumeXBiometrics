@@ -18,6 +18,7 @@ from typing import Any
 
 import yaml
 
+from biometria import LIMITE_DURO_PIXELES
 from biometria.errores import ConfiguracionInvalida
 
 # Raíz del repositorio (carpeta que contiene el paquete `biometria`).
@@ -161,6 +162,8 @@ def _validar(cfg: Config) -> None:
         errores.append("bd.agregacion debe ser 'max' o 'media'")
     if cfg.limites.max_bytes_imagen <= 0 or cfg.limites.max_pixeles <= 0:
         errores.append("los límites de imagen deben ser positivos")
+    if cfg.limites.max_pixeles > LIMITE_DURO_PIXELES:
+        errores.append(f"limites.max_pixeles no puede superar el límite duro ({LIMITE_DURO_PIXELES})")
     if cfg.limites.max_muestras_por_id < 1:
         errores.append("limites.max_muestras_por_id debe ser >= 1")
     if errores:
