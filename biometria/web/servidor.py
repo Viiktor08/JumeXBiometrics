@@ -8,9 +8,14 @@ API (las fotos se envían como cuerpo binario de la petición, sin multipart):
     GET  /api/estado                        extractor, umbrales, nº de personas e integridad
     GET  /api/personas                      [{id, muestras, foto}]
     GET  /api/caras/<clave>.jpg             retrato de una persona
+    POST /api/analizar                      cuerpo: la foto (solo el pipeline, no toca la BD)
     POST /api/verificar?id=<id>             cuerpo: la foto
     POST /api/identificar                   cuerpo: la foto
     POST /api/inscribir?id=<id>             cuerpo: la foto
+    DELETE /api/personas?id=<id>            borra a una persona (todas sus muestras)
+
+Los POST admiten `&caja=x,y,ancho,alto` (píxeles de la foto) para marcar la
+cara a mano cuando el detector no la encuentra o elige otra.
 
 Solo escucha en 127.0.0.1. Además, para que otra web abierta en el navegador
 no pueda usar la API (CSRF / DNS rebinding): se exige la cabecera
@@ -22,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import mimetypes
 import threading
 import time
@@ -34,7 +40,7 @@ from urllib.parse import parse_qs, urlsplit
 from biometria.config import RAIZ_REPO, cargar_config
 from biometria.errores import ErrorBiometrico, IdInvalido
 from biometria.sistema import SistemaBiometrico
-from biometria.web.analisis import Analisis, Galeria, a_data_url, analizar, retrato
+from biometria.web.analisis import Analisis, Galeria, a_data_url, analizar, retrato_de_analisis
 
 CARPETA_ESTATICOS = Path(__file__).resolve().parent / "static"
 CONFIG_POR_DEFECTO = RAIZ_REPO / "config_lens.yaml"
@@ -85,7 +91,9 @@ class Aplicacion:
     # ------------------------------------------------------------------ #
     def _respuesta_analisis(self, analisis: Analisis) -> dict:
         """Lo común a las tres operaciones: detecciones, cara alineada, template..."""
-        respuesta: dict = {"ok": analisis.ok, "tiempos_ms": analisis.tiempos_ms}
+        respuesta: dict = {"ok": analisis.ok, "tiempos_ms": analisis.tiempos_ms,
+                           "seleccion": analisis.seleccion,
+                           "region": list(analisis.region) if analisis.region else None}
         if analisis.imagen is not None:
             alto, ancho = analisis.imagen.shape[:2]
             respuesta["imagen"] = {"ancho": ancho, "alto": alto}
@@ -100,8 +108,9 @@ class Aplicacion:
         if analisis.procesada is not None:
             respuesta["cara_alineada"] = a_data_url(analisis.procesada.cara)
             respuesta["nitidez"] = round(analisis.procesada.nitidez, 1)
-            respuesta["retrato"] = a_data_url(
-                retrato(analisis.imagen, analisis.procesada.deteccion.landmarks), ".jpg")
+            imagen_retrato = retrato_de_analisis(analisis)
+            if imagen_retrato is not None:
+                respuesta["retrato"] = a_data_url(imagen_retrato, ".jpg")
         if analisis.template is not None:
             respuesta["template"] = {"dimension": int(analisis.template.size),
                                      "valores": [round(float(v), 5) for v in analisis.template]}
@@ -112,9 +121,9 @@ class Aplicacion:
         respuesta["error"] = error.a_dict()
         return respuesta
 
-    def operar(self, operacion: str, id_persona: str | None, foto: bytes) -> dict:
+    def operar(self, operacion: str, id_persona: str | None, foto: bytes, region=None) -> dict:
         with self.lock:
-            analisis = analizar(self.sistema, foto)
+            analisis = analizar(self.sistema, foto, region)
             respuesta = self._respuesta_analisis(analisis)
             if analisis.error is not None:
                 return self._error(respuesta, analisis.error)
@@ -125,6 +134,15 @@ class Aplicacion:
                 return self._error(respuesta, e)
             respuesta["tiempos_ms"]["comparacion"] = round((time.perf_counter() - inicio) * 1000, 1)
             return respuesta
+
+    def _analizar(self, _id: None, _analisis: Analisis) -> dict:
+        return {}
+
+    def eliminar(self, id_persona: str) -> dict:
+        with self.lock:
+            borradas = self.sistema.bd.eliminar(id_persona)
+            self.galeria.eliminar(id_persona)
+            return {"ok": True, "resultado": {"id": id_persona.strip(), "muestras_borradas": borradas}}
 
     def _verificar(self, id_persona: str, analisis: Analisis) -> dict:
         r = self.sistema.verificar_t(id_persona, analisis.template)
@@ -242,17 +260,41 @@ class Manejador(BaseHTTPRequestHandler):
             return self._fallo(HTTPStatus.FORBIDDEN, "cabecera_requerida", "Falta la cabecera X-JumeX-Lens")
         partes = urlsplit(self.path)
         operacion = partes.path.removeprefix("/api/")
-        if operacion not in ("verificar", "identificar", "inscribir"):
+        if operacion not in ("analizar", "verificar", "identificar", "inscribir"):
             return self._fallo(HTTPStatus.NOT_FOUND, "no_encontrado", f"No existe {partes.path}")
+        consulta = parse_qs(partes.query)
 
         id_persona = None
-        if operacion != "identificar":
-            id_persona = (parse_qs(partes.query).get("id") or [""])[0]
+        if operacion in ("verificar", "inscribir"):
+            id_persona = (consulta.get("id") or [""])[0]
             if not id_persona.strip():
                 return self._fallo(HTTPStatus.BAD_REQUEST, IdInvalido.codigo, "Escribe un nombre")
+        region = None
+        if consulta.get("caja"):
+            try:
+                region = tuple(float(v) for v in consulta["caja"][0].split(","))
+                if len(region) != 4 or not all(math.isfinite(v) for v in region):
+                    raise ValueError
+            except ValueError:
+                return self._fallo(HTTPStatus.BAD_REQUEST, "caja_invalida", "caja debe ser x,y,ancho,alto")
         if not foto:
             return self._fallo(HTTPStatus.BAD_REQUEST, "imagen_invalida", "No se ha recibido ninguna foto")
-        self._json(self.app.operar(operacion, id_persona, foto))
+        self._json(self.app.operar(operacion, id_persona, foto, region))
+
+    def do_DELETE(self) -> None:
+        if not self._host_valido():
+            return self._fallo(HTTPStatus.FORBIDDEN, "host_no_permitido", "Solo se admite localhost")
+        if self.headers.get("X-JumeX-Lens") != "1":
+            return self._fallo(HTTPStatus.FORBIDDEN, "cabecera_requerida", "Falta la cabecera X-JumeX-Lens")
+        partes = urlsplit(self.path)
+        if partes.path != "/api/personas":
+            return self._fallo(HTTPStatus.NOT_FOUND, "no_encontrado", f"No existe {partes.path}")
+        id_persona = (parse_qs(partes.query).get("id") or [""])[0]
+        try:
+            self._json(self.app.eliminar(id_persona))
+        except ErrorBiometrico as e:
+            self._json({"ok": False, "error": e.a_dict()},
+                       HTTPStatus.NOT_FOUND if e.codigo == "id_no_inscrito" else HTTPStatus.CONFLICT)
 
 
 def crear_servidor(ruta_config: Path, host: str = "127.0.0.1", puerto: int = 8000) -> ThreadingHTTPServer:

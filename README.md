@@ -144,8 +144,14 @@ python -m biometria.web                                                 # abre h
   de la BD) y `desconocidos/` (famosos que no están).
 - Guarda además un retrato por persona en `data/lens/caras/` **solo para la
   interfaz**; el sistema compara siempre templates.
+- **Si el detector no encuentra la cara o elige otra**, se puede marcar a mano
+  arrastrando un recuadro (o pulsando una de las caras detectadas). Se vuelve a
+  buscar la cara dentro del recuadro para alinearla con sus 5 puntos; si ni así
+  aparece, se usa el recuadro sin alinear y se avisa de que será menos fiable.
+- **Inscribir pide confirmación** ("¿Es esta la cara de X?") antes de guardar, y
+  desde la pestaña Base de datos se puede eliminar a una persona.
 - Solo escucha en `127.0.0.1`, exige la cabecera `X-JumeX-Lens` en los POST y
-  rechaza un `Host` distinto de localhost (CSRF y DNS rebinding).
+  DELETE y rechaza un `Host` distinto de localhost (CSRF y DNS rebinding).
 
 ## Detector y cámara
 
@@ -380,6 +386,10 @@ Decisiones tomadas donde el enunciado es ambiguo o deja libertad:
     de la configuración. Por eso hay que **importar `biometria` antes que `cv2`**.
 13. **Imágenes grandes:** se detecta sobre una copia reducida a 1280 px de lado,
     pero la cara se recorta de la imagen original a resolución completa.
+    Además se detecta también a 640 y 320 px y se combinan los resultados: YuNet
+    no ve las caras que ocupan más del ~40 % del ancho de su entrada (un retrato
+    de primer plano), y en las copias pequeñas esas caras sí tienen un tamaño que
+    reconoce.
 
 14. **Toda puntuación de similitud está en [0, 1]** y "más alto = más parecido",
     sea cual sea el extractor. Así los umbrales de `config.yaml` significan lo

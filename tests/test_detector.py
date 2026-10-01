@@ -136,3 +136,17 @@ def test_evaluar_frame_y_dibujar(detector, astronauta):
 def test_evaluar_frame_sin_caras(detector):
     detecciones, procesada, estado = evaluar_frame(detector, np.zeros((240, 320, 3), np.uint8), None)
     assert detecciones == [] and procesada is None and estado == ""
+
+
+def test_detecta_caras_muy_grandes(detector, astronauta):
+    # Un primer plano en el que la cara ocupa ~70 % del ancho: YuNet a una sola
+    # escala no la ve; la detección multiescala sí.
+    x, y, w, h = detector.detectar(astronauta)[0].caja
+    lado = int(w / 0.7)
+    cx, cy = x + w // 2, y + h // 2
+    borde = cv2.copyMakeBorder(astronauta, lado, lado, lado, lado, cv2.BORDER_REFLECT)
+    primer_plano = borde[cy + lado - lado // 2: cy + lado + lado // 2, cx + lado - lado // 2: cx + lado + lado // 2]
+    grande = cv2.resize(primer_plano, (2560, 2560))
+    detecciones = detector.detectar(grande)
+    assert len(detecciones) == 1
+    assert detecciones[0].caja[2] > 2560 * 0.5

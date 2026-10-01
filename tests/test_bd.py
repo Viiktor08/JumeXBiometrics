@@ -300,3 +300,18 @@ def test_ids_invalidos(id_persona):
 def test_id_unicode_se_guarda_bien(bd, extractor):
     bd.inscribir("José Pérez", template_aleatorio(extractor, 0))
     assert BaseDatos(bd.cfg, extractor).ids() == ["José Pérez"]
+
+
+def test_eliminar_persona(bd, extractor):
+    bd_con_tres_filas(bd, extractor)
+    assert bd.eliminar("Ana") == 2
+    assert bd.ids() == ["Luis"]  # el resto sigue verificando (HMAC re-firmado)
+    with pytest.raises(IdNoInscrito):
+        bd.eliminar("Ana")
+
+
+def test_no_se_puede_eliminar_en_una_bd_manipulada(bd, extractor):
+    lineas = bd_con_tres_filas(bd, extractor)
+    escribir_lineas(bd, lineas[:-1])
+    with pytest.raises(IntegridadBD):
+        bd.eliminar("Ana")

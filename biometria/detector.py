@@ -48,6 +48,15 @@ PLANTILLA_LANDMARKS_112 = np.array(
 # reescalan después a la imagen original, de donde se recorta la cara.
 MAX_LADO_DETECCION = 1280
 
+# YuNet pierde las caras que ocupan más del ~40 % del ancho de su entrada
+# (p. ej. un retrato de primer plano). Por eso se detecta también sobre copias
+# más pequeñas, donde esa misma cara ya tiene un tamaño que la red reconoce, y
+# se combinan los resultados. Lado mayor de cada copia:
+LADOS_DETECCION = (MAX_LADO_DETECCION, 640, 320)
+# Dos detecciones de escalas distintas con más solapamiento (IoU) que esto son
+# la misma cara: se queda la de mayor confianza.
+IOU_MISMA_CARA = 0.4
+
 
 @dataclass(frozen=True)
 class Deteccion:
@@ -103,6 +112,15 @@ def alinear(imagen: np.ndarray, landmarks: np.ndarray, tam: tuple[int, int]) -> 
     )
 
 
+def iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    """Intersección sobre unión de dos cajas (x, y, ancho, alto)."""
+    ix = max(0, min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]))
+    iy = max(0, min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1]))
+    interseccion = ix * iy
+    union = a[2] * a[3] + b[2] * b[3] - interseccion
+    return interseccion / union if union > 0 else 0.0
+
+
 class Detector:
     """Envoltorio de YuNet con alineado y control de calidad configurables."""
 
@@ -137,18 +155,32 @@ class Detector:
             raise ValueError("umbral_confianza debe estar en [0, 1]")
 
         alto, ancho = imagen.shape[:2]
-        escala = min(1.0, MAX_LADO_DETECCION / max(alto, ancho))
+        escalas = sorted({min(1.0, lado / max(alto, ancho)) for lado in LADOS_DETECCION}, reverse=True)
+        candidatas: list[Deteccion] = []
+        for escala in escalas:
+            candidatas.extend(self._detectar_a_escala(imagen, escala, umbral))
+
+        # Fusión entre escalas: de mayor a menor confianza, se descarta lo que
+        # se solapa con una cara ya aceptada.
+        detecciones: list[Deteccion] = []
+        for candidata in sorted(candidatas, key=lambda d: d.confianza, reverse=True):
+            if all(iou(candidata.caja, d.caja) <= IOU_MISMA_CARA for d in detecciones):
+                detecciones.append(candidata)
+        detecciones.sort(key=lambda d: d.area, reverse=True)
+        return detecciones
+
+    def _detectar_a_escala(self, imagen: np.ndarray, escala: float, umbral: float) -> list[Deteccion]:
+        """Pasa YuNet por una copia reescalada y devuelve las caras en coordenadas originales."""
+        alto, ancho = imagen.shape[:2]
         entrada = imagen
         if escala < 1.0:
-            entrada = cv2.resize(imagen, (round(ancho * escala), round(alto * escala)),
+            entrada = cv2.resize(imagen, (max(1, round(ancho * escala)), max(1, round(alto * escala))),
                                  interpolation=cv2.INTER_AREA)
-
         self._yunet.setInputSize((entrada.shape[1], entrada.shape[0]))
         self._yunet.setScoreThreshold(umbral)
         _, caras = self._yunet.detect(entrada)
         if caras is None:
             return []
-
         detecciones = []
         for fila in caras:
             # Formato YuNet: x, y, w, h, 5 landmarks (x, y), puntuación
@@ -160,7 +192,6 @@ class Detector:
                 landmarks=landmarks,
                 confianza=confianza,
             ))
-        detecciones.sort(key=lambda d: d.area, reverse=True)
         return detecciones
 
     def elegir_cara(self, detecciones: list[Deteccion]) -> Deteccion:

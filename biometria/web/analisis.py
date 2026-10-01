@@ -21,12 +21,16 @@ import cv2
 import numpy as np
 
 from biometria.bd import validar_id
-from biometria.detector import PLANTILLA_LANDMARKS_112, CaraProcesada, Deteccion
-from biometria.errores import ErrorBiometrico
+from biometria.detector import PLANTILLA_LANDMARKS_112, CaraProcesada, Deteccion, iou
+from biometria.errores import CaraPequena, ErrorBiometrico
 from biometria.imagen import cargar_imagen
 from biometria.sistema import SistemaBiometrico
 
 LADO_RETRATO = 256
+# Región marcada a mano: se amplía este margen por cada lado antes de volver a
+# buscar la cara dentro (el recuadro del usuario suele quedar justo).
+MARGEN_REGION = 0.25
+LADO_MINIMO_REGION = 24
 # Fracción del retrato que ocupa la plantilla de landmarks: < 1 deja margen
 # alrededor de la cara (la cara alineada de 112x112 va muy justa).
 ESCALA_RETRATO = 0.62
@@ -42,14 +46,62 @@ class Analisis:
     template: np.ndarray | None = None
     error: ErrorBiometrico | None = None
     tiempos_ms: dict[str, float] = field(default_factory=dict)
+    # "automatica": la eligió el detector; "manual": se buscó dentro del recuadro
+    # del usuario; "manual_sin_puntos": tampoco ahí, se usa el recuadro sin alinear.
+    seleccion: str = "automatica"
+    region: tuple[int, int, int, int] | None = None
 
     @property
     def ok(self) -> bool:
         return self.error is None and self.template is not None
 
 
-def analizar(sistema: SistemaBiometrico, foto) -> Analisis:
-    """Carga ► detecta ► elige cara ► calidad y alineado ► extrae, cronometrando cada paso."""
+def _recortar_region(imagen: np.ndarray, region, margen: float) -> tuple[np.ndarray, int, int]:
+    """Recorte de la región ampliada con `margen`, recortada a los bordes. Devuelve (recorte, x0, y0)."""
+    alto, ancho = imagen.shape[:2]
+    x, y, w, h = region
+    mx, my = int(w * margen), int(h * margen)
+    x0, y0 = max(0, x - mx), max(0, y - my)
+    x1, y1 = min(ancho, x + w + mx), min(alto, y + h + my)
+    return imagen[y0:y1, x0:x1], x0, y0
+
+
+def validar_region(region, imagen: np.ndarray) -> tuple[int, int, int, int]:
+    """Recorta la región (x, y, ancho, alto) a la imagen y comprueba que tiene tamaño útil."""
+    alto, ancho = imagen.shape[:2]
+    x, y, w, h = (int(round(v)) for v in region)
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(ancho, x + w), min(alto, y + h)
+    if x1 - x0 < LADO_MINIMO_REGION or y1 - y0 < LADO_MINIMO_REGION:
+        raise CaraPequena(f"El recuadro marcado es demasiado pequeño (mínimo {LADO_MINIMO_REGION} px)")
+    return x0, y0, x1 - x0, y1 - y0
+
+
+def _cara_en_region(sistema: SistemaBiometrico, imagen: np.ndarray, region) -> Deteccion | None:
+    """Busca la cara dentro del recuadro del usuario (con margen) y la devuelve en
+    coordenadas de la imagen completa; la que más se solapa con el recuadro."""
+    recorte, x0, y0 = _recortar_region(imagen, region, MARGEN_REGION)
+    # Umbral más bajo que el automático: el usuario ya ha dicho dónde está la cara.
+    umbral = min(sistema.cfg.detector.umbral_confianza, 0.5)
+    candidatas = sistema.detector.detectar(recorte, umbral_confianza=umbral)
+    if not candidatas:
+        return None
+    desplazadas = [
+        Deteccion(caja=(d.caja[0] + x0, d.caja[1] + y0, d.caja[2], d.caja[3]),
+                  landmarks=d.landmarks + np.array([x0, y0], dtype=np.float32),
+                  confianza=d.confianza)
+        for d in candidatas
+    ]
+    return max(desplazadas, key=lambda d: iou(d.caja, region))
+
+
+def analizar(sistema: SistemaBiometrico, foto, region=None) -> Analisis:
+    """Carga ► detecta ► elige cara ► calidad y alineado ► extrae, cronometrando cada paso.
+
+    Con `region` (x, y, ancho, alto en píxeles de la imagen) la cara la marca el
+    usuario: se busca dentro de ese recuadro y, si no aparece, se usa el
+    recuadro tal cual, sin alinear (como los métodos _sd).
+    """
     analisis = Analisis()
     reloj = time.perf_counter()
 
@@ -62,10 +114,24 @@ def analizar(sistema: SistemaBiometrico, foto) -> Analisis:
     try:
         analisis.imagen = cargar_imagen(foto, sistema.cfg.limites)
         marcar("carga")
-        analisis.detecciones = sistema.detector.detectar(analisis.imagen)
-        marcar("deteccion")
-        elegida = sistema.detector.elegir_cara(analisis.detecciones)
-        analisis.procesada = sistema.detector.procesar_deteccion(analisis.imagen, elegida)
+        if region is None:
+            analisis.detecciones = sistema.detector.detectar(analisis.imagen)
+            marcar("deteccion")
+            elegida = sistema.detector.elegir_cara(analisis.detecciones)
+            analisis.procesada = sistema.detector.procesar_deteccion(analisis.imagen, elegida)
+        else:
+            analisis.region = validar_region(region, analisis.imagen)
+            elegida = _cara_en_region(sistema, analisis.imagen, analisis.region)
+            marcar("deteccion")
+            if elegida is not None:
+                analisis.seleccion = "manual"
+                analisis.detecciones = [elegida]
+                analisis.procesada = sistema.detector.procesar_deteccion(analisis.imagen, elegida)
+            else:
+                analisis.seleccion = "manual_sin_puntos"
+                x, y, w, h = analisis.region
+                analisis.procesada = sistema.detector.preparar_sin_detector(
+                    analisis.imagen[y:y + h, x:x + w])
         marcar("alineado")
         analisis.template = sistema.extractor.extraer(analisis.procesada.cara)
         marcar("extraccion")
@@ -84,6 +150,24 @@ def retrato(imagen: np.ndarray, landmarks: np.ndarray, lado: int = LADO_RETRATO)
         return cv2.resize(imagen, (lado, lado))
     return cv2.warpAffine(imagen, matriz, (lado, lado), flags=cv2.INTER_CUBIC,
                           borderMode=cv2.BORDER_REPLICATE)
+
+
+def retrato_de_analisis(analisis: Analisis) -> np.ndarray | None:
+    """Retrato para mostrar: alineado si hay landmarks; si la cara se marcó a mano
+    sin puntos, el recuadro hecho cuadrado."""
+    if analisis.imagen is None or analisis.procesada is None:
+        return None
+    if analisis.procesada.deteccion is not None:
+        return retrato(analisis.imagen, analisis.procesada.deteccion.landmarks)
+    if analisis.region is None:
+        return None
+    x, y, w, h = analisis.region
+    lado = max(w, h)
+    cx, cy = x + w // 2, y + h // 2
+    alto, ancho = analisis.imagen.shape[:2]
+    x0, y0 = max(0, cx - lado // 2), max(0, cy - lado // 2)
+    recorte = analisis.imagen[y0:min(alto, y0 + lado), x0:min(ancho, x0 + lado)]
+    return cv2.resize(recorte, (LADO_RETRATO, LADO_RETRATO), interpolation=cv2.INTER_AREA)
 
 
 def a_data_url(imagen: np.ndarray, formato: str = ".png") -> str:
@@ -128,9 +212,11 @@ class Galeria:
         return bool(ok)
 
     def guardar_de_analisis(self, id_persona: str, analisis: Analisis) -> bool:
-        if analisis.imagen is None or analisis.procesada is None or analisis.procesada.deteccion is None:
-            return False
-        return self.guardar(id_persona, retrato(analisis.imagen, analisis.procesada.deteccion.landmarks))
+        imagen = retrato_de_analisis(analisis)
+        return imagen is not None and self.guardar(id_persona, imagen)
+
+    def eliminar(self, id_persona: str) -> None:
+        self.ruta(id_persona).unlink(missing_ok=True)
 
     def ruta_por_clave(self, clave: str) -> Path | None:
         """Ruta del retrato a partir de la clave de la URL (solo hex de 20)."""

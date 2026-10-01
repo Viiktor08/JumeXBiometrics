@@ -313,3 +313,14 @@ class BaseDatos:
         self._escribir_filas(nuevas)
         return existentes + 1
 
+
+    def eliminar(self, id_persona: str) -> int:
+        """Borra todas las muestras de una persona. Devuelve cuántas se han borrado."""
+        id_persona = validar_id(id_persona)
+        filas = self._cargar()  # verifica la integridad antes de reescribir
+        quedan = [(id_fila, campo) for id_fila, campo, _ in filas if id_fila != id_persona]
+        borradas = len(filas) - len(quedan)
+        if borradas == 0:
+            raise IdNoInscrito(f"'{id_persona}' no está inscrito")
+        self._escribir_filas(quedan)
+        return borradas

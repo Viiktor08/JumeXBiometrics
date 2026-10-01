@@ -200,3 +200,42 @@ def test_web_protecciones(servidor, ruta_astronauta):
     assert conexion.getresponse().status == 413
     conexion.close()
     assert peticion(servidor, "GET", "/api/caras/../../k.key")[0] == 404
+
+
+def test_web_caja_manual(servidor, ruta_astronauta, astronauta, detector):
+    foto = ruta_astronauta.read_bytes()
+    x, y, w, h = detector.detectar(astronauta)[0].caja
+    # Recuadro aproximado sobre la cara: se busca dentro y se alinea con sus puntos
+    _, r, _ = peticion(servidor, "POST", f"/api/analizar?caja={x + 8},{y + 8},{w - 16},{h - 16}", foto)
+    assert r["ok"] and r["seleccion"] == "manual" and r["detecciones"][0]["elegida"]
+    assert "resultado" in r and r["resultado"] == {}
+    # Recuadro sin cara: se usa tal cual, sin alinear
+    _, r, _ = peticion(servidor, "POST", "/api/analizar?caja=0,300,120,120", foto)
+    assert r["ok"] and r["seleccion"] == "manual_sin_puntos" and r["region"] == [0, 300, 120, 120]
+    # Recuadros inválidos
+    assert peticion(servidor, "POST", "/api/analizar?caja=1,2,3", foto)[0] == 400
+    assert peticion(servidor, "POST", "/api/analizar?caja=nan,0,50,50", foto)[0] == 400
+    _, r, _ = peticion(servidor, "POST", "/api/analizar?caja=5,5,10,10", foto)
+    assert r["error"]["error"] == "cara_pequena"
+
+
+def test_web_analizar_no_toca_la_bd(servidor, ruta_astronauta):
+    peticion(servidor, "POST", "/api/analizar", ruta_astronauta.read_bytes())
+    _, estado, _ = peticion(servidor, "GET", "/api/estado")
+    assert estado["personas"] == 0
+
+
+def test_web_eliminar_persona(servidor, ruta_astronauta):
+    foto = ruta_astronauta.read_bytes()
+    peticion(servidor, "POST", "/api/inscribir?id=Eileen", foto)
+    _, personas, _ = peticion(servidor, "GET", "/api/personas")
+    url_foto = personas["personas"][0]["foto"]
+    estado, r, _ = peticion(servidor, "DELETE", "/api/personas?id=Eileen")
+    assert estado == 200 and r["resultado"]["muestras_borradas"] == 1
+    assert peticion(servidor, "GET", "/api/personas")[1]["personas"] == []
+    assert peticion(servidor, "GET", url_foto)[0] == 404  # el retrato también se borra
+    assert peticion(servidor, "DELETE", "/api/personas?id=Eileen")[0] == 404
+    conexion = http.client.HTTPConnection("127.0.0.1", servidor, timeout=30)
+    conexion.request("DELETE", "/api/personas?id=Eileen")  # sin cabecera
+    assert conexion.getresponse().status == 403
+    conexion.close()

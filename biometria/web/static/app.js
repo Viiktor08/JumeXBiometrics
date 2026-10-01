@@ -34,6 +34,8 @@ function icono(nombre) {
     igual: '<path d="M5 9h14M5 15h14"/>',
     distinto: '<path d="M5 9h14M5 15h14M16 5 8 19"/>',
     escudo: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>',
+    papelera: '<path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6"/>',
+    mano: '<path d="M18 11V6a2 2 0 0 0-4 0M14 10V4a2 2 0 0 0-4 0v2M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/>',
   };
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
@@ -57,7 +59,11 @@ const estado = {
   bitmap: null,          // ImageBitmap de la foto
   ocupado: false,
   ultimaRespuesta: null,
+  ultimaOperacion: null,
   inscritoReciente: null,
+  caja: null,            // cara elegida [x, y, ancho, alto] en píxeles de la foto
+  cajaOrigen: null,      // "manual" (la marcó el usuario) o "confirmada" (detectada y confirmada al inscribir)
+  seleccion: null,       // modo "marcar a mano": {inicio, actual, rect}
 };
 
 const MODOS = {
@@ -193,8 +199,9 @@ function cambiarModo(modo, { conservarFoto = false } = {}) {
   if (conservarFoto && estado.archivo) {
     reiniciarPipeline();
     pintarResultadoVacio();
+    salirSeleccion(false);
     dibujarFotoQuieta();
-    mostrarBotones({ ejecutar: true, otra: true });
+    mostrarBotones({ ejecutar: true, otra: true, manual: !!estado.bitmap && !!estado.ultimaRespuesta?.imagen });
   } else {
     reiniciarTodo();
   }
@@ -265,6 +272,9 @@ async function recibirArchivo(archivo) {
     return;
   }
   estado.archivo = archivo;
+  estado.caja = null;
+  estado.cajaOrigen = null;
+  salirSeleccion(false);
   try {
     estado.bitmap = await createImageBitmap(archivo);
   } catch {
@@ -301,17 +311,30 @@ function mostrarEscenario() {
   ajustarLienzo();
 }
 
-function mostrarBotones({ ejecutar = false, otra = false }) {
+function mostrarBotones({ ejecutar = false, otra = false, manual = false, usar = false, cancelar = false }) {
   const boton = $("#boton-ejecutar");
   boton.hidden = !ejecutar;
   boton.textContent = `${MODOS[estado.modo]?.boton || "Analizar"} esta foto`;
   $("#boton-otra").hidden = !otra;
+  $("#boton-manual").hidden = !manual;
+  $("#boton-usar").hidden = !usar;
+  $("#boton-cancelar").hidden = !cancelar;
+}
+
+/** ¿Tiene sentido ofrecer "marcar la cara a mano" tras esta respuesta? */
+function puedeMarcar(respuesta) {
+  if (!estado.bitmap || !respuesta?.imagen) return false;
+  const codigo = respuesta.error?.error;
+  return !["imagen_invalida", "imagen_demasiado_grande", "red", "integridad_bd", "bd_corrupta"].includes(codigo);
 }
 
 function reiniciarTodo() {
   estado.archivo = null;
   estado.bitmap = null;
   estado.ultimaRespuesta = null;
+  estado.caja = null;
+  estado.cajaOrigen = null;
+  salirSeleccion(false);
   detenerAnimacion();
   $("#zona").classList.remove("con-foto");
   $("#zona-vacia").hidden = false;
@@ -453,11 +476,14 @@ function animarDetecciones(respuesta) {
     const { ctx, ancho, alto } = lienzo;
     pintarFoto(0);
     const elegida = detecciones.find((d) => d.elegida);
+    const manual = respuesta.seleccion && respuesta.seleccion !== "automatica";
+    // Sin puntos clave: el foco es el propio recuadro marcado a mano
+    const foco = elegida ? elegida.caja : (respuesta.seleccion === "manual_sin_puntos" ? respuesta.region : null);
 
     // Foco: oscurece todo menos la cara elegida
-    if (elegida) {
-      const [x0, y0] = aLienzo(elegida.caja[0], elegida.caja[1]);
-      const [x1, y1] = aLienzo(elegida.caja[0] + elegida.caja[2], elegida.caja[1] + elegida.caja[3]);
+    if (foco) {
+      const [x0, y0] = aLienzo(foco[0], foco[1]);
+      const [x1, y1] = aLienzo(foco[0] + foco[2], foco[1] + foco[3]);
       ctx.save();
       ctx.fillStyle = `rgba(6, 18, 46, ${0.5 * suave})`;
       ctx.beginPath();
@@ -496,7 +522,7 @@ function animarDetecciones(respuesta) {
         ctx.strokeRect(rc.x, rc.y, rc.w, rc.h);
         ctx.setLineDash([]);
       }
-      etiqueta(ctx, rc.x, rc.y - 8, d.elegida ? `Cara · ${pct(d.confianza)}` : `Ignorada · ${pct(d.confianza)}`, d.elegida);
+      etiqueta(ctx, rc.x, rc.y - 8, d.elegida ? `${manual ? "Marcada a mano" : "Cara"} · ${pct(d.confianza)}` : `Ignorada · ${pct(d.confianza)}`, d.elegida);
       // 5 puntos clave, uno tras otro
       if (d.elegida) {
         d.landmarks.forEach(([lx, ly], k) => {
@@ -524,20 +550,171 @@ function animarDetecciones(respuesta) {
       ctx.restore();
     });
 
+    if (respuesta.seleccion === "manual_sin_puntos" && respuesta.region) {
+      const [x0, y0] = aLienzo(respuesta.region[0], respuesta.region[1]);
+      const [x1, y1] = aLienzo(respuesta.region[0] + respuesta.region[2], respuesta.region[1] + respuesta.region[3]);
+      ctx.save();
+      ctx.globalAlpha = suave;
+      esquinasMarco(ctx, { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, "#fbbf24", Math.max(14, (x1 - x0) * 0.22), 3.5, 8);
+      etiqueta(ctx, x0, y0 - 8, "Marcada a mano · sin puntos", true, "#d97706");
+      ctx.restore();
+    }
+
     if (p < 1) lienzo.raf = requestAnimationFrame(cuadro);
     else lienzo.raf = 0;
   };
   lienzo.raf = requestAnimationFrame(cuadro);
 }
 
-function etiqueta(ctx, x, y, texto, destacada) {
+/* ------------------------------------------------------------------ */
+/* Marcar la cara a mano                                               */
+/* ------------------------------------------------------------------ */
+const aImagen = (cx, cy) => {
+  const { marco } = lienzo;
+  const ancho = estado.ultimaRespuesta?.imagen?.ancho || estado.bitmap.width;
+  const alto = estado.ultimaRespuesta?.imagen?.alto || estado.bitmap.height;
+  return [(cx - marco.x) * ancho / marco.w, (cy - marco.y) * alto / marco.h];
+};
+const aLienzoDesdeImagen = (x, y) => {
+  const { marco } = lienzo;
+  const ancho = estado.ultimaRespuesta?.imagen?.ancho || estado.bitmap.width;
+  const alto = estado.ultimaRespuesta?.imagen?.alto || estado.bitmap.height;
+  return [marco.x + x * marco.w / ancho, marco.y + y * marco.h / alto];
+};
+
+function entrarSeleccion() {
+  if (!estado.bitmap || estado.ocupado) return;
+  detenerAnimacion();
+  estado.seleccion = { inicio: null, actual: null, rect: null };
+  $("#lienzo").classList.add("seleccionando");
+  $("#escenario-estado").textContent = "Arrastra un recuadro alrededor de la cara";
+  mostrarBotones({ cancelar: true });
+  dibujarSeleccion();
+}
+
+function salirSeleccion(redibujar = true) {
+  if (!estado.seleccion) return;
+  estado.seleccion = null;
+  $("#lienzo")?.classList.remove("seleccionando");
+  $("#escenario-estado").textContent = "";
+  if (redibujar && estado.ultimaRespuesta) {
+    animarDetecciones(estado.ultimaRespuesta);
+    mostrarBotones({ otra: true, manual: puedeMarcar(estado.ultimaRespuesta) });
+  }
+}
+
+function rectSeleccion() {
+  const sel = estado.seleccion;
+  if (sel.inicio && sel.actual) {
+    const [ax, ay] = sel.inicio, [bx, by] = sel.actual;
+    return { x: Math.min(ax, bx), y: Math.min(ay, by), w: Math.abs(bx - ax), h: Math.abs(by - ay) };
+  }
+  return sel.rect;
+}
+
+function dibujarSeleccion() {
+  const { ctx } = lienzo;
+  pintarFoto(0.45);
+  // Caras que encontró el detector: se pueden pulsar para elegirlas
+  for (const d of estado.ultimaRespuesta?.detecciones || []) {
+    const [x0, y0] = aLienzoDesdeImagen(d.caja[0], d.caja[1]);
+    const [x1, y1] = aLienzoDesdeImagen(d.caja[0] + d.caja[2], d.caja[1] + d.caja[3]);
+    ctx.save();
+    ctx.setLineDash([6, 5]);
+    ctx.strokeStyle = "rgba(255, 255, 255, .7)";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
+    ctx.restore();
+    etiqueta(ctx, x0, y0 - 8, "Pulsa para elegir", false);
+  }
+  const r = rectSeleccion();
+  if (r && r.w > 2 && r.h > 2) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, lienzo.ancho, lienzo.alto);
+    ctx.rect(r.x, r.y, r.w, r.h);
+    ctx.fillStyle = "rgba(6, 18, 46, .45)";
+    ctx.fill("evenodd");
+    ctx.drawImage(estado.bitmap, ...(() => {
+      const [ix, iy] = aImagen(r.x, r.y), [jx, jy] = aImagen(r.x + r.w, r.y + r.h);
+      const k = estado.bitmap.width / (estado.ultimaRespuesta?.imagen?.ancho || estado.bitmap.width);
+      return [ix * k, iy * k, (jx - ix) * k, (jy - iy) * k, r.x, r.y, r.w, r.h];
+    })());
+    ctx.restore();
+    esquinasMarco(ctx, r, "#fbbf24", Math.max(12, Math.min(r.w, r.h) * 0.25), 3, 6);
+    etiqueta(ctx, r.x, r.y - 8, "Cara marcada a mano", true, "#d97706");
+  }
+}
+
+function prepararSeleccion() {
+  const canvas = $("#lienzo");
+  const punto = (e) => {
+    const caja = canvas.getBoundingClientRect();
+    const { marco } = lienzo;
+    const x = Math.min(Math.max(e.clientX - caja.left, marco.x), marco.x + marco.w);
+    const y = Math.min(Math.max(e.clientY - caja.top, marco.y), marco.y + marco.h);
+    return [x, y];
+  };
+  canvas.addEventListener("pointerdown", (e) => {
+    if (!estado.seleccion) return;
+    e.preventDefault();
+    e.stopPropagation();
+    canvas.setPointerCapture(e.pointerId);
+    estado.seleccion.inicio = punto(e);
+    estado.seleccion.actual = punto(e);
+    dibujarSeleccion();
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    if (!estado.seleccion?.inicio) return;
+    estado.seleccion.actual = punto(e);
+    dibujarSeleccion();
+  });
+  canvas.addEventListener("pointerup", (e) => {
+    const sel = estado.seleccion;
+    if (!sel?.inicio) return;
+    const r = rectSeleccion();
+    sel.inicio = sel.actual = null;
+    if (r.w < 6 && r.h < 6) {
+      // Un clic: ¿sobre una cara detectada?
+      const [ix, iy] = aImagen(r.x, r.y);
+      const d = (estado.ultimaRespuesta?.detecciones || []).find((c) =>
+        ix >= c.caja[0] && ix <= c.caja[0] + c.caja[2] && iy >= c.caja[1] && iy <= c.caja[1] + c.caja[3]);
+      if (d) {
+        const [x0, y0] = aLienzoDesdeImagen(d.caja[0], d.caja[1]);
+        const [x1, y1] = aLienzoDesdeImagen(d.caja[0] + d.caja[2], d.caja[1] + d.caja[3]);
+        sel.rect = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+      }
+    } else if (r.w >= 12 && r.h >= 12) {
+      sel.rect = r;
+    }
+    dibujarSeleccion();
+    if (sel.rect) {
+      $("#escenario-estado").textContent = "¿Es esta la cara? Pulsa \"Usar esta cara\" o vuelve a marcar";
+      mostrarBotones({ usar: true, cancelar: true });
+    }
+  });
+  canvas.addEventListener("click", (e) => { if (estado.seleccion) e.stopPropagation(); });
+}
+
+function usarSeleccion() {
+  const r = estado.seleccion?.rect;
+  if (!r) return;
+  const [x0, y0] = aImagen(r.x, r.y);
+  const [x1, y1] = aImagen(r.x + r.w, r.y + r.h);
+  estado.caja = [x0, y0, x1 - x0, y1 - y0].map((v) => Math.round(v));
+  estado.cajaOrigen = "manual";
+  salirSeleccion(false);
+  ejecutar();
+}
+
+function etiqueta(ctx, x, y, texto, destacada, color = "#0ea5e9") {
   ctx.save();
   ctx.font = "700 12px 'Plus Jakarta Sans', sans-serif";
   const w = ctx.measureText(texto).width + 16;
   const h = 22;
   const yy = Math.max(4, y - h);
   const xx = Math.min(Math.max(4, x), lienzo.ancho - w - 4);
-  ctx.fillStyle = destacada ? "#0ea5e9" : "rgba(15, 27, 61, .75)";
+  ctx.fillStyle = destacada ? color : "rgba(15, 27, 61, .75)";
   ctx.beginPath();
   ctx.roundRect(xx, yy, w, h, 7);
   ctx.fill();
@@ -604,7 +781,7 @@ function dibujarCodigo(canvas, valores, alto) {
   });
 }
 
-async function animarPipeline(respuesta) {
+async function animarPipeline(respuesta, operacion) {
   const t = respuesta.tiempos_ms || {};
   const err = respuesta.error;
   const pasoError = err ? (ERRORES[err.error]?.[0] || "comparacion") : null;
@@ -614,9 +791,13 @@ async function animarPipeline(respuesta) {
 
   const detalles = {
     carga: respuesta.imagen ? `${respuesta.imagen.ancho}×${respuesta.imagen.alto} px` : null,
-    deteccion: det.length === 0 ? "Ninguna cara encontrada"
+    deteccion: respuesta.seleccion === "manual_sin_puntos" ? "Marcada a mano · sin puntos clave"
+      : respuesta.seleccion === "manual" && elegida ? `Marcada a mano · confianza ${pct(elegida.confianza)}`
+      : det.length === 0 ? "Ninguna cara encontrada"
       : `${det.length} cara${det.length > 1 ? "s" : ""}${elegida ? ` · confianza ${pct(elegida.confianza)}` : ""}${det.length > 1 && elegida ? " · se usa la mayor" : ""}`,
-    alineado: respuesta.nitidez != null ? `112×112 · nitidez ${Math.round(respuesta.nitidez)} ✓` : null,
+    alineado: respuesta.nitidez == null ? null
+      : respuesta.seleccion === "manual_sin_puntos" ? `Recorte sin alinear · nitidez ${Math.round(respuesta.nitidez)}`
+      : `112×112 · nitidez ${Math.round(respuesta.nitidez)} ✓`,
     extraccion: respuesta.template ? `${respuesta.template.dimension} números` : null,
     comparacion: null,
   };
@@ -629,6 +810,10 @@ async function animarPipeline(respuesta) {
 
   let deteccionPintada = false;
   for (const paso of PASOS) {
+    if (paso === "comparacion" && operacion === "analizar" && !err) {
+      marcarPaso(paso, "", "Pendiente de tu confirmación", null);
+      break;
+    }
     if (paso === pasoError) {
       marcarPaso(paso, "error", ERRORES[err.error]?.[1] || err.mensaje, t[paso]);
       break;
@@ -654,12 +839,15 @@ async function animarPipeline(respuesta) {
 /* ------------------------------------------------------------------ */
 /* Ejecutar una operación                                              */
 /* ------------------------------------------------------------------ */
-async function ejecutar() {
+async function ejecutar({ operacion = null, rapido = false } = {}) {
   if (estado.ocupado || !estado.archivo) return;
   const m = MODOS[estado.modo];
   const nombre = $("#nombre").value.trim();
   if (m.pideNombre && !nombre) { pedirNombre(); return; }
+  // Inscribir va en dos pasos: primero se analiza y se pide confirmación
+  const op = operacion || (estado.modo === "inscribir" ? "analizar" : estado.modo);
 
+  salirSeleccion(false);
   estado.ocupado = true;
   mostrarBotones({});
   reiniciarPipeline();
@@ -670,7 +858,11 @@ async function ejecutar() {
   const estadoEscenario = $("#escenario-estado");
   estadoEscenario.replaceChildren(el("span", { class: "girando" }), "Buscando caras…");
 
-  const url = `/api/${estado.modo}` + (m.pideNombre ? `?id=${encodeURIComponent(nombre)}` : "");
+  const parametros = new URLSearchParams();
+  if (op === "verificar" || op === "inscribir") parametros.set("id", nombre);
+  if (estado.caja) parametros.set("caja", estado.caja.join(","));
+  const consulta = parametros.toString();
+  const url = `/api/${op}` + (consulta ? `?${consulta}` : "");
   let respuesta;
   try {
     [respuesta] = await Promise.all([
@@ -679,23 +871,27 @@ async function ejecutar() {
         headers: { "Content-Type": estado.archivo.type || "application/octet-stream", "X-JumeX-Lens": "1" },
         body: estado.archivo,
       }),
-      esperar(reduceMovimiento ? 0 : 1400), // que dé tiempo a ver el escaneo
+      esperar(reduceMovimiento || rapido ? 0 : 1400), // que dé tiempo a ver el escaneo
     ]);
   } catch (e) {
     respuesta = { ok: false, detecciones: [], error: { error: "red", mensaje: `No se pudo contactar con el servidor (${e.message}).` } };
   }
+  // Una cara detectada y confirmada se envía como caja, pero no la ha marcado el usuario
+  if (estado.cajaOrigen === "confirmada" && respuesta.seleccion === "manual") respuesta.seleccion = "automatica";
   estado.ultimaRespuesta = respuesta;
+  estado.ultimaOperacion = op;
   estadoEscenario.textContent = "";
 
-  await animarPipeline(respuesta);
-  pintarResultado(respuesta, nombre);
+  await animarPipeline(respuesta, op);
+  if (op === "analizar" && respuesta.ok) pintarConfirmacion(respuesta, nombre);
+  else pintarResultado(respuesta, nombre);
   if (matchMedia("(max-width: 960px)").matches) {
     $("#resultado").scrollIntoView({ behavior: reduceMovimiento ? "auto" : "smooth", block: "start" });
   }
   estado.ocupado = false;
-  mostrarBotones({ otra: true });
+  mostrarBotones({ otra: true, manual: puedeMarcar(respuesta) });
 
-  if (estado.modo === "inscribir" && respuesta.ok) {
+  if (op === "inscribir" && respuesta.ok) {
     estado.inscritoReciente = respuesta.resultado.id;
     await Promise.all([cargarEstado(), cargarPersonas()]);
   }
@@ -762,6 +958,50 @@ function explicacion(...partes) {
   return el("p", { class: "explicacion" }, ...partes);
 }
 
+/** Inscribir, paso 1: enseñar la cara encontrada y pedir confirmación antes de guardar. */
+function pintarConfirmacion(respuesta, nombre) {
+  const elegida = (respuesta.detecciones || []).find((d) => d.elegida);
+  const sinPuntos = respuesta.seleccion === "manual_sin_puntos";
+  const contenido = el("div", { class: "aparece" },
+    veredicto("info", "Revisa antes de guardar", `¿Es esta la cara de ${nombre}?`,
+      "Comprueba que el recuadro está sobre la cara correcta. No se guarda nada hasta que confirmes."),
+    el("div", { class: "guardado" },
+      figuraCara(respuesta.retrato || respuesta.cara_alineada, "La cara encontrada"),
+      el("div", { class: "guardado__datos" },
+        el("h4", { text: "Si está bien" }),
+        el("p", { text: `Se guardará su template (${respuesta.template.dimension} números) con el nombre "${nombre}".` }),
+        el("h4", { text: "Si no es la cara", style: null }),
+        el("p", { text: "Márcala tú arrastrando un recuadro sobre la foto." }))),
+    sinPuntos ? notaManual(respuesta) : null,
+    el("div", { class: "acciones" },
+      el("button", {
+        class: "boton boton--principal", onclick: () => {
+          // Se inscribe exactamente la cara revisada
+          const r = elegida ? elegida.caja : respuesta.region;
+          if (r) {
+            estado.caja = r;
+            if (respuesta.seleccion === "automatica") estado.cajaOrigen = "confirmada";
+          }
+          ejecutar({ operacion: "inscribir", rapido: true });
+        },
+      }, icono("si"), `Sí, inscribir a ${nombre}`),
+      el("button", { class: "boton boton--secundario", onclick: entrarSeleccion }, "No, la marco yo")),
+  );
+  $("#resultado").replaceChildren(contenido);
+}
+
+function notaManual(respuesta) {
+  if (respuesta.seleccion === "manual") {
+    return el("p", { class: "explicacion" }, el("b", { text: "Cara marcada a mano. " }),
+      "Se buscó la cara dentro de tu recuadro y se alineó con sus 5 puntos, igual que en la detección automática.");
+  }
+  if (respuesta.seleccion === "manual_sin_puntos") {
+    return el("p", { class: "explicacion explicacion--aviso" }, el("b", { text: "Ojo: cara sin alinear. " }),
+      "Dentro del recuadro no se encontraron los puntos de la cara, así que se usa el recorte tal cual (como los métodos _sd). La comparación será menos fiable.");
+  }
+  return null;
+}
+
 function pintarResultado(respuesta, nombre) {
   const caja = $("#resultado");
   const contenido = el("div", { class: "aparece" });
@@ -774,6 +1014,10 @@ function pintarResultado(respuesta, nombre) {
       ayuda && e.mensaje ? explicacion(el("b", { text: "Detalle técnico: " }), `${e.mensaje} (código ${e.error})`) : null,
     );
     if (respuesta.retrato) contenido.append(el("div", { class: "caras" }, figuraCara(respuesta.retrato, "La que has subido", "Tu foto"), el("div"), el("div")));
+    if (puedeMarcar(respuesta) && ["sin_cara", "varias_caras", "cara_pequena", "imagen_borrosa"].includes(e.error)) {
+      contenido.append(el("div", { class: "acciones" },
+        el("button", { class: "boton boton--principal", onclick: entrarSeleccion }, "Marcar la cara a mano")));
+    }
     caja.replaceChildren(contenido);
     return;
   }
@@ -840,10 +1084,14 @@ function pintarResultado(respuesta, nombre) {
         el("button", { class: "boton boton--secundario", text: "Verificarla ahora", onclick: () => { $("#nombre").value = r.id; cambiarModo("verificar"); } }),
         el("button", { class: "boton boton--enlace", text: "Ver en la base de datos →", onclick: () => cambiarModo("bd") })),
     );
+    const nota = notaManual(respuesta);
+    if (nota) contenido.insertBefore(nota, contenido.lastChild);
     caja.replaceChildren(contenido);
     requestAnimationFrame(() => dibujarCodigo(codigo, respuesta.template.valores, 54));
     return;
   }
+  const nota = notaManual(respuesta);
+  if (nota) contenido.append(nota);
   caja.replaceChildren(contenido);
 }
 
@@ -869,21 +1117,26 @@ function pintarBD() {
   rejilla.replaceChildren(...visibles.map((p, i) => {
     const marco = el("div", { class: "cara__marco" });
     marco.append(p.foto ? el("img", { src: p.foto, alt: "", loading: "lazy" }) : el("div", { class: "iniciales", text: iniciales(p.id) }));
-    const tarjeta = el("button", {
-      class: `persona${p.id === estado.inscritoReciente ? " nueva" : ""}`,
-      title: `Verificar a ${p.id}`,
-      onclick: () => {
-        $("#nombre").value = p.id;
-        cambiarModo("verificar");
-        window.scrollTo({ top: $("#vista-operacion").offsetTop - 16, behavior: reduceMovimiento ? "auto" : "smooth" });
-        avisar(`Suelta una foto para comprobar si es ${p.id}`);
+    const tarjeta = el("div", { class: `persona${p.id === estado.inscritoReciente ? " nueva" : ""}` },
+      el("button", {
+        class: "persona__principal",
+        title: `Verificar a ${p.id}`,
+        onclick: () => {
+          $("#nombre").value = p.id;
+          cambiarModo("verificar");
+          window.scrollTo({ top: $("#vista-operacion").offsetTop - 16, behavior: reduceMovimiento ? "auto" : "smooth" });
+          avisar(`Suelta una foto para comprobar si es ${p.id}`);
+        },
       },
-    },
-      marco,
-      el("span", { class: "persona__nombre", text: p.id }),
-      el("span", { class: "persona__meta" },
-        el("span", { text: `${p.muestras} muestra${p.muestras > 1 ? "s" : ""}` }),
-        el("span", { class: "persona__accion", text: "Verificar →" })));
+        marco,
+        el("span", { class: "persona__nombre", text: p.id }),
+        el("span", { class: "persona__meta" },
+          el("span", { text: `${p.muestras} muestra${p.muestras > 1 ? "s" : ""}` }),
+          el("span", { class: "persona__accion", text: "Verificar →" }))),
+      el("button", {
+        class: "persona__borrar", title: `Eliminar a ${p.id}`, "aria-label": `Eliminar a ${p.id}`,
+        onclick: () => eliminarPersona(p),
+      }, icono("papelera")));
     tarjeta.style.setProperty("--i", Math.min(i, 40));
     return tarjeta;
   }));
@@ -893,6 +1146,20 @@ function pintarBD() {
   vacia.textContent = estado.personas.length === 0
     ? "La base de datos está vacía. Inscribe a alguien en la pestaña Inscribir."
     : `Nadie coincide con "${$("#buscador").value}".`;
+}
+
+async function eliminarPersona(p) {
+  const muestras = p.muestras > 1 ? ` y sus ${p.muestras} muestras` : "";
+  if (!confirm(`¿Eliminar a ${p.id}${muestras} de la base de datos?\n\nNo se puede deshacer.`)) return;
+  try {
+    const r = await api(`/api/personas?id=${encodeURIComponent(p.id)}`, { method: "DELETE", headers: { "X-JumeX-Lens": "1" } });
+    if (!r.ok) throw new Error(r.error?.mensaje || "error");
+    if (estado.inscritoReciente === p.id) estado.inscritoReciente = null;
+    avisar(`${p.id} eliminado/a de la base de datos`);
+  } catch (e) {
+    avisar(`No se pudo eliminar: ${e.message}`);
+  }
+  await Promise.all([cargarEstado(), cargarPersonas()]);
 }
 
 /* ------------------------------------------------------------------ */
@@ -926,6 +1193,10 @@ function iniciar() {
   $("#nombre").addEventListener("keydown", (e) => { if (e.key === "Enter") ejecutar(); });
   $("#boton-ejecutar").addEventListener("click", (e) => { e.stopPropagation(); ejecutar(); });
   $("#boton-otra").addEventListener("click", (e) => { e.stopPropagation(); reiniciarTodo(); $("#selector").click(); });
+  $("#boton-manual").addEventListener("click", (e) => { e.stopPropagation(); entrarSeleccion(); });
+  $("#boton-usar").addEventListener("click", (e) => { e.stopPropagation(); usarSeleccion(); });
+  $("#boton-cancelar").addEventListener("click", (e) => { e.stopPropagation(); salirSeleccion(); });
+  prepararSeleccion();
   $("#buscador").addEventListener("input", pintarBD);
 
   let temporizadorResize = 0;
@@ -934,7 +1205,8 @@ function iniciar() {
     temporizadorResize = setTimeout(() => {
       if (!estado.bitmap || $("#escenario").hidden) return;
       ajustarLienzo();
-      if (estado.ultimaRespuesta && !estado.ocupado) { lienzo.raf = 0; animarDetecciones(estado.ultimaRespuesta); }
+      if (estado.seleccion) { estado.seleccion.rect = null; dibujarSeleccion(); mostrarBotones({ cancelar: true }); }
+      else if (estado.ultimaRespuesta && !estado.ocupado) { lienzo.raf = 0; animarDetecciones(estado.ultimaRespuesta); }
       else if (!estado.ocupado) pintarFoto(0.15);
     }, 120);
   });
