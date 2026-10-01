@@ -19,7 +19,7 @@ de Docker), para que el grupo rival pueda ejecutarlo y atacarlo.
 |---|---|---|---|
 | 1 | `setup-base` | Estructura, dependencias, Docker, configuración | ✅ |
 | 2 | `detector` | YuNet, alineado por ojos, control de calidad y demo de cámara | ✅ |
-| 3 | `extractor` | Interfaz de extractor y LBP provisional | ⏳ |
+| 3 | `extractor` | Interfaz de extractor y LBP provisional | ✅ |
 | 4 | `bd-csv` | Base de datos CSV con validación e integridad (HMAC) | ⏳ |
 | 5 | `sistema-cli` | `SistemaBiometrico` con los 9 métodos y la CLI | ⏳ |
 | 6 | `inscripcion-evaluacion` | Inscripción masiva; FAR/FRR/EER, DET/ROC, CMC | ⏳ |
@@ -116,6 +116,54 @@ detector.detectar(imagen)              # [Deteccion(caja, landmarks, confianza),
 detector.procesar(imagen).cara         # cara alineada 112x112 (o error claro)
 ```
 
+## Extractor
+
+El extractor convierte la cara alineada en un **template** (vector float32) y
+compara dos templates con una **similitud en [0, 1]** (1 = idénticos). Se elige
+en `config.yaml` (`extractor.nombre` y `extractor.parametros`). El resto del
+sistema solo usa la interfaz común de `biometria/extractores/base.py`, así que
+cambiar de técnica no toca nada más.
+
+El extractor actual es **LBP uniforme por rejilla** (Ahonen et al., 2006),
+**provisional** hasta que nos asignen la técnica:
+
+- radio 1, 8 vecinos y rejilla de 7x7 celdas → 59 clases × 49 celdas = **2891 valores**;
+- cada celda es un histograma normalizado y el template completo suma 1;
+- similitud = 1 − χ²/2, donde χ² es la distancia chi-cuadrado (entre 0 y 2).
+
+Para comparar fotos a mano (pasan por detector → calidad → alineado → extractor):
+
+```bash
+python scripts/comparar_caras.py data/fotos/a.jpg data/fotos/b.jpg   # una puntuación
+python scripts/comparar_caras.py data/lfw/fotos/*.jpg                # matriz todas contra todas
+```
+
+Desde Python:
+
+```python
+from biometria.extractores import crear_extractor
+
+extractor = crear_extractor(cfg)
+t1 = extractor.extraer(detector.procesar(imagen1).cara)
+t2 = extractor.extraer(detector.procesar(imagen2).cara)
+extractor.comparar(t1, t2)             # -> 0.73
+extractor.validar_template(lista)      # TemplateInvalido si no es un template LBP válido
+```
+
+**Rendimiento orientativo del LBP en LFW** (144 personas con 2 fotos, `varias_caras: mayor`):
+
+| Medida | Valor |
+|---|---|
+| Similitud media, misma persona | 0,70 |
+| Similitud media, personas distintas | 0,68 |
+| EER | ≈ 37 % (umbral ≈ 0,69) |
+| Identificación rank-1 entre 144 | 11 % (azar: 0,7 %) |
+
+Distingue algo, pero poco: LFW tiene mucha variación de pose, luz y expresión, y
+cambiar radio, vecinos o rejilla apenas lo mejora (EER entre 37 y 39 %). **Con
+el umbral provisional de 0,5 se aceptaría a cualquiera** (FAR del 100 %): hay que
+calibrarlo en la fase 6 con las fotos del profesor.
+
 ## Estructura del repositorio
 
 ```
@@ -125,11 +173,15 @@ detector.procesar(imagen).cara         # cara alineada 112x112 (o error claro)
 │   ├── imagen.py           carga segura de imágenes (límites de bytes y píxeles)
 │   ├── detector.py         YuNet + alineado + control de calidad
 │   ├── camara.py           demo en directo con la webcam
-│   ├── extractores/        extractores intercambiables (LBP provisional, ...)
+│   ├── extractores/        extractores intercambiables
+│   │   ├── base.py         interfaz común: extraer, comparar, validar_template
+│   │   └── lbp.py          LBP uniforme por rejilla (provisional)
 │   └── __main__.py         punto de entrada: python -m biometria
 ├── scripts/
 │   ├── descargar_modelos.py
-│   └── probar_detector.py  procesa una carpeta y guarda las caras para revisarlas
+│   ├── probar_detector.py  procesa una carpeta y guarda las caras para revisarlas
+│   ├── preparar_lfw.py     50 personas de LFW para probar mientras no hay fotos
+│   └── comparar_caras.py   similitud entre las caras de varias fotos
 ├── tests/                  tests con pytest
 ├── data/                   (fuera de git) fotos, bd.csv y clave HMAC
 ├── models/                 (fuera de git) modelos descargados
@@ -191,6 +243,21 @@ Decisiones tomadas donde el enunciado es ambiguo o deja libertad:
     de la configuración. Por eso hay que **importar `biometria` antes que `cv2`**.
 13. **Imágenes grandes:** se detecta sobre una copia reducida a 1280 px de lado,
     pero la cara se recorta de la imagen original a resolución completa.
+
+14. **Toda puntuación de similitud está en [0, 1]** y "más alto = más parecido",
+    sea cual sea el extractor. Así los umbrales de `config.yaml` significan lo
+    mismo con LBP que con la técnica definitiva.
+15. **Los templates que llegan de fuera se validan** (`validar_template`):
+    dimensión exacta, sin NaN ni infinitos y, en LBP, valores no negativos y
+    cada celda normalizada. Esto filtra basura en los métodos `_t` y en la BD,
+    pero **no impide** que un atacante fabrique un template válido a medida;
+    eso irá en `THREAT_MODEL.md`.
+16. **LBP implementado con numpy, sin scikit-image**, para no añadir una
+    dependencia pesada. Se ha comparado con `skimage.feature.local_binary_pattern`:
+    los códigos coinciden salvo en empates exactos vecino = centro tras la
+    interpolación, que aquí siempre cuentan como 1 (definición original de LBP)
+    y en scikit-image dependen del redondeo.
+17. **`rejilla` es [columnas, filas]**, en el mismo orden que `tam_cara` ([ancho, alto]).
 
 ## Problemas frecuentes
 

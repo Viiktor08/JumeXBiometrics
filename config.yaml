@@ -24,7 +24,7 @@ extractor:
   parametros:             # se pasan tal cual al constructor del extractor
     radio: 1
     puntos: 8
-    rejilla: [7, 7]
+    rejilla: [7, 7]       # [columnas, filas] de celdas, mismo orden que tam_cara
 
 bd:
   ruta: data/bd.csv
