@@ -89,3 +89,7 @@ class IntegridadBD(ErrorBiometrico):
     """El HMAC no cuadra: el CSV ha sido modificado fuera del sistema."""
 
     codigo = "integridad_bd"
+
+
+class MuestraNoEncontrada(ErrorBiometrico):
+    codigo = "muestra_no_encontrada"

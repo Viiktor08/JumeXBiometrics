@@ -59,6 +59,7 @@ from biometria.errores import (
     IdNoInscrito,
     IntegridadBD,
     LimiteMuestras,
+    MuestraNoEncontrada,
     TemplateInvalido,
 )
 from biometria.extractores import Extractor
@@ -324,3 +325,67 @@ class BaseDatos:
             raise IdNoInscrito(f"'{id_persona}' no está inscrito")
         self._escribir_filas(quedan)
         return borradas
+
+    # ------------------------------------------------------------------ #
+    # Muestras individuales (para editar la BD desde la web)
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def clave_muestra(campo: str) -> str:
+        """Identificador estable de una muestra: hash de su campo template.
+
+        No hace falta otra columna en el CSV. Dos muestras con la misma clave
+        tendrían el template idéntico (son la misma muestra repetida).
+        """
+        return hashlib.sha256(campo.encode("ascii")).hexdigest()[:16]
+
+    def muestras_de(self, id_persona: str) -> list[tuple[str, np.ndarray]]:
+        """[(clave, template)] de una persona, en el orden del fichero."""
+        id_persona = validar_id(id_persona)
+        muestras = [(self.clave_muestra(campo), template)
+                    for id_fila, campo, template in self._cargar() if id_fila == id_persona]
+        if not muestras:
+            raise IdNoInscrito(f"'{id_persona}' no está inscrito")
+        return muestras
+
+    def eliminar_muestra(self, id_persona: str, clave: str) -> int:
+        """Borra una muestra concreta. Devuelve cuántas le quedan a esa persona."""
+        id_persona = validar_id(id_persona)
+        filas = self._cargar()
+        quedan = [(i, c) for i, c, _ in filas
+                  if not (i == id_persona and self.clave_muestra(c) == clave)]
+        if len(quedan) == len(filas):
+            raise MuestraNoEncontrada(f"'{id_persona}' no tiene ninguna muestra con clave {clave}")
+        self._escribir_filas(quedan)
+        return sum(i == id_persona for i, _ in quedan)
+
+    def renombrar(self, id_persona: str, nuevo: str) -> dict[str, str]:
+        """Cambia el id de todas las muestras de una persona.
+
+        Devuelve {clave antigua: clave nueva}: las claves solo cambian con los
+        templates cifrados, que llevan el id como dato asociado y hay que volver
+        a cifrar.
+        """
+        id_persona, nuevo = validar_id(id_persona), validar_id(nuevo)
+        filas = self._cargar()
+        if not any(i == id_persona for i, _, _ in filas):
+            raise IdNoInscrito(f"'{id_persona}' no está inscrito")
+        if nuevo != id_persona and any(i == nuevo for i, _, _ in filas):
+            raise IdInvalido(f"Ya hay alguien inscrito como '{nuevo}'")
+        claves: dict[str, str] = {}
+        nuevas = []
+        for i, campo, template in filas:
+            if i == id_persona:
+                nuevo_campo = self._codificar(nuevo, template) if campo.startswith(PREFIJO_CIFRADO) else campo
+                claves[self.clave_muestra(campo)] = self.clave_muestra(nuevo_campo)
+                nuevas.append((nuevo, nuevo_campo))
+            else:
+                nuevas.append((i, campo))
+        self._escribir_filas(nuevas)
+        return claves
+
+    def claves_por_id(self) -> dict[str, list[str]]:
+        """{id: [claves de sus muestras]} en el orden del fichero."""
+        claves: dict[str, list[str]] = defaultdict(list)
+        for id_fila, campo, _ in self._cargar():
+            claves[id_fila].append(self.clave_muestra(campo))
+        return dict(claves)

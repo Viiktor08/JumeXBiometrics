@@ -148,8 +148,15 @@ python -m biometria.web                                                 # abre h
   arrastrando un recuadro (o pulsando una de las caras detectadas). Se vuelve a
   buscar la cara dentro del recuadro para alinearla con sus 5 puntos; si ni así
   aparece, se usa el recuadro sin alinear y se avisa de que será menos fiable.
-- **Inscribir pide confirmación** ("¿Es esta la cara de X?") antes de guardar, y
-  desde la pestaña Base de datos se puede eliminar a una persona.
+- **Inscribir pide confirmación** ("¿Es esta la cara de X?") antes de guardar.
+- **Identificar con varias personas en la foto:** cada cara (hasta 12) se alinea,
+  se convierte en su template y se identifica por separado; el resultado dice
+  quién es cada una o que no está guardada, y las desconocidas se pueden
+  inscribir desde ahí.
+- **Ficha de cada persona** (pestaña Base de datos): ver sus fotos (una por
+  muestra), añadir otra, borrar una, elegir la foto principal, cambiar el nombre
+  o eliminarla. Las fotos se guardan en `data/lens/caras/<persona>/<muestra>.jpg`,
+  donde `<muestra>` es un hash del template de esa fila de `bd.csv`.
 - Solo escucha en `127.0.0.1`, exige la cabecera `X-JumeX-Lens` en los POST y
   DELETE y rechaza un `Host` distinto de localhost (CSRF y DNS rebinding).
 

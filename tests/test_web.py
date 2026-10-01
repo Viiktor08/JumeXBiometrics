@@ -76,22 +76,37 @@ def test_sface_modelo_inexistente(cfg, tmp_path):
 
 # --- Galería y análisis ------------------------------------------------------------
 
-def test_galeria_usa_un_hash_como_nombre(tmp_path):
+def test_galeria_usa_hashes_como_nombres(tmp_path):
     galeria = Galeria(tmp_path)
-    assert galeria.ruta("Ana López").parent == tmp_path
-    assert galeria.ruta("Ana López") == galeria.ruta("  Ana López ")  # mismo id normalizado
+    assert galeria.carpeta_persona("Ana López") == galeria.carpeta_persona("  Ana López ")
+    assert galeria.carpeta_persona("Ana López").parent == tmp_path
     with pytest.raises(IdInvalido):
-        galeria.ruta("../../etc/passwd")
-    for clave in ("../x", "A" * 20, "0" * 19, "0" * 21, "g" * 20):
-        assert galeria.ruta_por_clave(clave) is None
+        galeria.carpeta_persona("../../etc/passwd")
+    with pytest.raises(ValueError):
+        galeria.ruta_muestra("Ana", "../../clave")
+    persona = galeria.clave("Ana")
+    for partes in (["../x.jpg"], ["A" * 20 + ".jpg"], [persona, "../k.jpg"], [persona, "0" * 15 + ".jpg"],
+                   [persona, "0" * 16 + ".png"], [persona, "a", "b.jpg"]):
+        assert galeria.ruta_por_url(partes) is None
 
 
-def test_galeria_no_sobrescribe(tmp_path):
+def test_galeria_principal_y_migracion(tmp_path):
     galeria = Galeria(tmp_path)
     negra = np.zeros((32, 32, 3), np.uint8)
-    assert galeria.guardar("Ana", negra) is True
-    assert galeria.guardar("Ana", negra + 255) is False
-    assert galeria.ruta_por_clave(galeria.clave("Ana")) == galeria.ruta("Ana")
+    a, b = "a" * 16, "b" * 16
+    assert galeria.principal("Ana", [a, b]) is None
+    galeria.guardar_muestra("Ana", b, negra)
+    assert galeria.principal("Ana", [a, b]) == b          # la primera con foto
+    galeria.guardar_muestra("Ana", a, negra)
+    assert galeria.principal("Ana", [a, b]) == a
+    galeria.fijar_principal("Ana", b)
+    assert galeria.principal("Ana", [a, b]) == b          # la elegida
+    assert galeria.ruta_por_url([galeria.clave("Ana"), f"{b}.jpg"]) == galeria.ruta_muestra("Ana", b)
+    # Retrato antiguo (uno por persona): solo se migra si hay una única muestra
+    cv2.imwrite(str(galeria.ruta_legado("Luis")), negra)
+    cv2.imwrite(str(galeria.ruta_legado("Eva")), negra)
+    assert galeria.migrar({"Luis": ["c" * 16], "Eva": ["d" * 16, "e" * 16]}) == 1
+    assert galeria.tiene_foto("Luis", "c" * 16) and not galeria.tiene_foto("Eva", "d" * 16)
 
 
 def test_analizar_guarda_cada_paso(cfg, tmp_path, detector, ruta_astronauta, monkeypatch):
@@ -239,3 +254,57 @@ def test_web_eliminar_persona(servidor, ruta_astronauta):
     conexion.request("DELETE", "/api/personas?id=Eileen")  # sin cabecera
     assert conexion.getresponse().status == 403
     conexion.close()
+
+
+
+def test_web_identificar_varias_personas(servidor, astronauta):
+    # Dos copias de la misma persona y una tercera cara que no está inscrita (girada en espejo
+    # no vale: sería la misma persona). Basta con comprobar que cada cara recibe su resultado.
+    ok, foto_una = cv2.imencode(".png", astronauta)
+    peticion(servidor, "POST", "/api/inscribir?id=Eileen", foto_una.tobytes())
+    ok, foto_dos = cv2.imencode(".png", np.hstack([astronauta, astronauta]))
+    _, r, _ = peticion(servidor, "POST", "/api/identificar", foto_dos.tobytes())
+    assert r["ok"] and r["multiple"] and len(r["caras"]) == 2
+    assert [c["numero"] for c in r["caras"]] == [1, 2]
+    assert r["caras"][0]["caja"][0] < r["caras"][1]["caja"][0]          # izquierda a derecha
+    assert all(c["estado"] == "identificada" and c["id"] == "Eileen" for c in r["caras"])
+    assert all(c["retrato"].startswith("data:image/jpeg") for c in r["caras"])
+    assert r["resultado"]["identificadas"] == 2 and r["resultado"]["desconocidas"] == 0
+    # Marcando una cara a mano se vuelve al modo de una sola cara
+    x, y, w, h = r["caras"][1]["caja"]
+    _, r, _ = peticion(servidor, "POST", f"/api/identificar?caja={x},{y},{w},{h}", foto_dos.tobytes())
+    assert not r.get("multiple") and r["resultado"]["id"] == "Eileen"
+
+
+def test_web_ficha_y_edicion_de_persona(servidor, ruta_astronauta, astronauta):
+    foto = ruta_astronauta.read_bytes()
+    peticion(servidor, "POST", "/api/inscribir?id=Eileen", foto)
+    ok, girada = cv2.imencode(".png", cv2.flip(astronauta, 1))
+    _, r, _ = peticion(servidor, "POST", "/api/inscribir?id=Eileen", girada.tobytes())
+    assert r["resultado"]["muestras"] == 2 and len(r["resultado"]["clave"]) == 16
+
+    _, ficha, _ = peticion(servidor, "GET", "/api/persona?id=Eileen")
+    assert [m["principal"] for m in ficha["muestras"]] == [True, False]
+    primera, segunda = (m["clave"] for m in ficha["muestras"])
+    assert all(peticion(servidor, "GET", m["foto"])[0] == 200 for m in ficha["muestras"])
+
+    # Elegir la segunda como principal
+    _, ficha, _ = peticion(servidor, "POST", f"/api/persona/principal?id=Eileen&clave={segunda}")
+    assert ficha["foto"].endswith(f"{segunda}.jpg")
+    assert peticion(servidor, "POST", "/api/persona/principal?id=Eileen&clave=" + "0" * 16)[0] == 404
+
+    # Borrar una muestra
+    _, r, _ = peticion(servidor, "DELETE", f"/api/muestras?id=Eileen&clave={primera}")
+    assert r["resultado"]["quedan"] == 1
+    assert peticion(servidor, "DELETE", f"/api/muestras?id=Eileen&clave={primera}")[0] == 404
+
+    # Renombrar: las fotos se mueven con la persona
+    _, ficha, _ = peticion(servidor, "POST", "/api/persona/renombrar?id=Eileen&nuevo=Eileen%20Collins")
+    assert ficha["id"] == "Eileen Collins" and peticion(servidor, "GET", ficha["foto"])[0] == 200
+    assert peticion(servidor, "GET", "/api/persona?id=Eileen")[0] == 404
+    assert peticion(servidor, "POST", "/api/persona/renombrar?id=Eileen%20Collins&nuevo=%3Dmal")[0] == 400
+
+    # Borrar la última muestra elimina a la persona
+    _, r, _ = peticion(servidor, "DELETE", f"/api/muestras?id=Eileen%20Collins&clave={segunda}")
+    assert r["resultado"]["quedan"] == 0
+    assert peticion(servidor, "GET", "/api/personas")[1]["personas"] == []

@@ -34,6 +34,8 @@ function icono(nombre) {
     igual: '<path d="M5 9h14M5 15h14"/>',
     distinto: '<path d="M5 9h14M5 15h14M16 5 8 19"/>',
     escudo: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>',
+    estrella: '<path d="m12 2 3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1z"/>',
+    mas: '<path d="M12 5v14M5 12h14"/>',
     papelera: '<path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6"/>',
     mano: '<path d="M18 11V6a2 2 0 0 0-4 0M14 10V4a2 2 0 0 0-4 0v2M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/>',
   };
@@ -456,8 +458,76 @@ function esquinasMarco(ctx, r, color, largo = 26, grosor = 3, radio = 6) {
   ctx.restore();
 }
 
+const COLOR_ESTADO = { identificada: "#059669", desconocida: "#d97706", descartada: "#64748b" };
+
+/** Foto con varias personas: cada cara con su número y su nombre (o "Desconocida"). */
+function animarVariasCaras(respuesta) {
+  detenerAnimacion();
+  const img = respuesta.imagen;
+  const duracion = reduceMovimiento ? 1 : 900;
+  const inicio = performance.now();
+  const aLienzo = (x, y) => {
+    const { marco } = lienzo;
+    return [marco.x + x * marco.w / img.ancho, marco.y + y * marco.h / img.alto];
+  };
+  const cuadro = (ahora) => {
+    const p = Math.min(1, (ahora - inicio) / duracion);
+    const suave = 1 - Math.pow(1 - p, 3);
+    const { ctx, ancho, alto } = lienzo;
+    pintarFoto(0);
+    const rects = respuesta.caras.map((c) => {
+      const [x0, y0] = aLienzo(c.caja[0], c.caja[1]);
+      const [x1, y1] = aLienzo(c.caja[0] + c.caja[2], c.caja[1] + c.caja[3]);
+      return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+    });
+    // Foco en todas las caras a la vez
+    ctx.save();
+    ctx.fillStyle = `rgba(6, 18, 46, ${0.45 * suave})`;
+    ctx.beginPath();
+    ctx.rect(0, 0, ancho, alto);
+    rects.forEach((r) => ctx.roundRect(r.x - 5, r.y - 5, r.w + 10, r.h + 10, 10));
+    ctx.fill("evenodd");
+    ctx.restore();
+
+    respuesta.caras.forEach((c, i) => {
+      const r = rects[i];
+      const aparicion = Math.max(0, Math.min(1, suave * 1.6 - i * 0.12));
+      if (aparicion <= 0) return;
+      const color = COLOR_ESTADO[c.estado];
+      ctx.save();
+      ctx.globalAlpha = aparicion;
+      if (c.estado === "descartada") {
+        ctx.setLineDash([5, 5]);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(r.x, r.y, r.w, r.h);
+        ctx.setLineDash([]);
+      } else {
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 12;
+        esquinasMarco(ctx, r, color, Math.max(12, r.w * 0.22), 3.5, 8);
+        ctx.shadowBlur = 0;
+        c.landmarks.forEach(([lx, ly]) => {
+          const [px, py] = aLienzo(lx, ly);
+          ctx.beginPath();
+          ctx.arc(px, py, 2.6, 0, Math.PI * 2);
+          ctx.fillStyle = "#fff";
+          ctx.fill();
+        });
+      }
+      const nombre = c.estado === "identificada" ? c.id : c.estado === "desconocida" ? "Desconocida" : "No comprobable";
+      etiqueta(ctx, r.x, r.y - 8, `${c.numero} · ${nombre}`, true, color);
+      ctx.restore();
+    });
+    if (p < 1) lienzo.raf = requestAnimationFrame(cuadro);
+    else lienzo.raf = 0;
+  };
+  lienzo.raf = requestAnimationFrame(cuadro);
+}
+
 /** Detecciones: foco en la cara elegida, esquinas, confianza y 5 puntos. */
 function animarDetecciones(respuesta) {
+  if (respuesta.multiple) { animarVariasCaras(respuesta); return; }
   detenerAnimacion();
   const detecciones = respuesta.detecciones || [];
   const img = respuesta.imagen;
@@ -802,7 +872,13 @@ async function animarPipeline(respuesta, operacion) {
     comparacion: null,
   };
   const r = respuesta.resultado;
-  if (r) {
+  if (r?.multiple) {
+    const comprobables = r.identificadas + r.desconocidas;
+    detalles.deteccion = `${respuesta.caras.length} caras · se comprueban todas`;
+    detalles.alineado = `${comprobables} cara${comprobables === 1 ? "" : "s"} alineada${comprobables === 1 ? "" : "s"}${r.descartadas ? ` · ${r.descartadas} descartada${r.descartadas > 1 ? "s" : ""}` : ""}`;
+    detalles.extraccion = `${comprobables} template${comprobables === 1 ? "" : "s"} de ${respuesta.template.dimension} números`;
+    detalles.comparacion = `${comprobables} cara${comprobables === 1 ? "" : "s"} × ${r.personas} personas`;
+  } else if (r) {
     if (estado.modo === "verificar") detalles.comparacion = `Con ${r.id}: ${pct(r.puntuacion)}`;
     if (estado.modo === "identificar") detalles.comparacion = `Con ${r.personas} persona${r.personas === 1 ? "" : "s"}`;
     if (estado.modo === "inscribir") detalles.comparacion = `Guardado · ${r.muestras} muestra${r.muestras > 1 ? "s" : ""}`;
@@ -892,6 +968,9 @@ async function ejecutar({ operacion = null, rapido = false } = {}) {
   mostrarBotones({ otra: true, manual: puedeMarcar(respuesta) });
 
   if (op === "inscribir" && respuesta.ok) {
+    // La cara elegida valía para esta inscripción; la siguiente operación vuelve a detectar todas
+    estado.caja = null;
+    estado.cajaOrigen = null;
     estado.inscritoReciente = respuesta.resultado.id;
     await Promise.all([cargarEstado(), cargarPersonas()]);
   }
@@ -990,6 +1069,59 @@ function pintarConfirmacion(respuesta, nombre) {
   $("#resultado").replaceChildren(contenido);
 }
 
+/** Identificar con varias personas: una fila por cara. */
+function pintarVariasCaras(respuesta) {
+  const r = respuesta.resultado;
+  const partes = [
+    r.identificadas && `${r.identificadas} identificada${r.identificadas > 1 ? "s" : ""}`,
+    r.desconocidas && `${r.desconocidas} desconocida${r.desconocidas > 1 ? "s" : ""}`,
+    r.descartadas && `${r.descartadas} sin poder comprobar`,
+  ].filter(Boolean);
+  const filas = respuesta.caras.map((c) => {
+    const fotoBD = c.estado === "identificada"
+      ? (c.foto ? el("img", { src: c.foto, alt: c.id }) : el("span", { class: "iniciales", text: iniciales(c.id) }))
+      : el("span", { class: "iniciales", text: "?" });
+    let texto, detalle;
+    if (c.estado === "identificada") {
+      texto = el("p", {}, "Esta persona es ", el("b", { text: c.id }));
+      detalle = `Similitud ${pct(c.puntuacion)} (umbral ${pct(r.umbral)})`;
+    } else if (c.estado === "desconocida") {
+      texto = el("p", {}, "A esta persona ", el("b", { text: "no la tengo guardada" }));
+      const mejor = c.candidatos?.[0];
+      detalle = mejor ? `La más parecida es ${mejor.id}, solo al ${pct(mejor.puntuacion)}` : "La base de datos está vacía";
+    } else {
+      texto = el("p", {}, el("b", { text: "No puedo comprobar esta cara" }));
+      detalle = ERRORES[c.error?.error]?.[1] || c.error?.mensaje || "";
+    }
+    return el("li", { class: `grupo__fila grupo__fila--${c.estado}` },
+      el("span", { class: "grupo__numero", text: c.numero }),
+      el("img", { class: "grupo__cara", src: c.retrato, alt: `Cara ${c.numero}` }),
+      el("span", { class: "grupo__flecha" }, icono(c.estado === "identificada" ? "igual" : c.estado === "desconocida" ? "distinto" : "aviso")),
+      el("span", { class: "grupo__bd" }, fotoBD),
+      el("div", { class: "grupo__texto" }, texto, el("small", { text: detalle })),
+      c.estado === "desconocida"
+        ? el("button", { class: "boton boton--secundario boton--pequeno", onclick: () => inscribirCara(c), text: "Inscribirla" })
+        : null);
+  });
+  $("#resultado").replaceChildren(el("div", { class: "aparece" },
+    veredicto(r.identificadas ? "si" : "duda", "Varias personas en la foto",
+      `He encontrado ${respuesta.caras.length} personas`, partes.join(" · ")),
+    el("ol", { class: "grupo" }, filas),
+    el("p", { class: "explicacion" }, el("b", { text: "¿Cómo? " }),
+      `Cada cara se alinea y se convierte en su propio template, y se compara con las ${r.personas} personas de la base de datos. Si alguna sale mal, márcala a mano para comprobarla sola.`)));
+}
+
+/** Desde una foto de grupo: inscribir a una de las caras desconocidas. */
+function inscribirCara(cara) {
+  estado.caja = cara.caja;
+  estado.cajaOrigen = "confirmada";
+  $("#nombre").value = "";
+  cambiarModo("inscribir", { conservarFoto: true });
+  window.scrollTo({ top: $("#vista-operacion").offsetTop - 16, behavior: reduceMovimiento ? "auto" : "smooth" });
+  pedirNombre();
+  avisar(`Escribe el nombre de la persona ${cara.numero} y pulsa Inscribir`);
+}
+
 function notaManual(respuesta) {
   if (respuesta.seleccion === "manual") {
     return el("p", { class: "explicacion" }, el("b", { text: "Cara marcada a mano. " }),
@@ -1040,6 +1172,7 @@ function pintarResultado(respuesta, nombre) {
            : `La similitud (${pct(r.puntuacion)}) no llega al umbral (${pct(r.umbral)}), así que el sistema rechaza que sea ${r.id}.`),
     );
   } else if (estado.modo === "identificar") {
+    if (r.multiple) { pintarVariasCaras(respuesta); return; }
     if (r.personas === 0) {
       contenido.append(veredicto("duda", "Base de datos vacía", "No hay nadie con quien comparar", "Inscribe a alguien primero en la pestaña Inscribir."));
     } else if (r.identificado) {
@@ -1120,19 +1253,14 @@ function pintarBD() {
     const tarjeta = el("div", { class: `persona${p.id === estado.inscritoReciente ? " nueva" : ""}` },
       el("button", {
         class: "persona__principal",
-        title: `Verificar a ${p.id}`,
-        onclick: () => {
-          $("#nombre").value = p.id;
-          cambiarModo("verificar");
-          window.scrollTo({ top: $("#vista-operacion").offsetTop - 16, behavior: reduceMovimiento ? "auto" : "smooth" });
-          avisar(`Suelta una foto para comprobar si es ${p.id}`);
-        },
+        title: `Ver la ficha de ${p.id}`,
+        onclick: () => abrirFicha(p.id),
       },
         marco,
         el("span", { class: "persona__nombre", text: p.id }),
         el("span", { class: "persona__meta" },
           el("span", { text: `${p.muestras} muestra${p.muestras > 1 ? "s" : ""}` }),
-          el("span", { class: "persona__accion", text: "Verificar →" }))),
+          el("span", { class: "persona__accion", text: "Ver ficha →" }))),
       el("button", {
         class: "persona__borrar", title: `Eliminar a ${p.id}`, "aria-label": `Eliminar a ${p.id}`,
         onclick: () => eliminarPersona(p),
@@ -1148,13 +1276,225 @@ function pintarBD() {
     : `Nadie coincide con "${$("#buscador").value}".`;
 }
 
-async function eliminarPersona(p) {
+/* ------------------------------------------------------------------ */
+/* Ficha de una persona: sus fotos y edición                           */
+/* ------------------------------------------------------------------ */
+const ficha = { id: null, datos: null, renombrando: false, anadiendo: null };
+
+async function abrirFicha(id) {
+  ficha.id = id;
+  ficha.renombrando = false;
+  ficha.anadiendo = null;
+  const dialogo = $("#ficha");
+  if (!dialogo.open) dialogo.showModal();
+  await recargarFicha();
+}
+
+async function recargarFicha() {
+  try {
+    const datos = await api(`/api/persona?id=${encodeURIComponent(ficha.id)}`);
+    if (!datos.ok) throw new Error(datos.error?.mensaje || "No encontrada");
+    ficha.datos = datos;
+    ficha.id = datos.id;
+    pintarFicha();
+  } catch (e) {
+    $("#ficha").close();
+    avisar(e.message);
+  }
+}
+
+async function tras_editar() {
+  await Promise.all([cargarEstado(), cargarPersonas()]);
+}
+
+function pintarFicha() {
+  const d = ficha.datos;
+  const lleno = d.muestras.length >= d.max_muestras;
+  const portada = el("div", { class: "cara__marco ficha__portada" },
+    d.foto ? el("img", { src: d.foto, alt: d.id }) : el("div", { class: "iniciales", text: iniciales(d.id) }));
+
+  let nombre;
+  if (ficha.renombrando) {
+    const entrada = el("input", { class: "ficha__entrada", value: d.id, maxlength: "100", "aria-label": "Nuevo nombre" });
+    const guardar = async () => {
+      const nuevo = entrada.value.trim();
+      if (!nuevo || nuevo === d.id) { ficha.renombrando = false; pintarFicha(); return; }
+      const r = await api(`/api/persona/renombrar?id=${encodeURIComponent(d.id)}&nuevo=${encodeURIComponent(nuevo)}`,
+        { method: "POST", headers: { "X-JumeX-Lens": "1" } });
+      if (!r.ok) { avisar(r.error?.mensaje || "No se pudo renombrar"); return; }
+      ficha.renombrando = false;
+      avisar(`Ahora se llama ${r.id}`);
+      ficha.datos = r; ficha.id = r.id;
+      pintarFicha();
+      tras_editar();
+    };
+    entrada.addEventListener("keydown", (e) => { if (e.key === "Enter") guardar(); if (e.key === "Escape") { e.preventDefault(); ficha.renombrando = false; pintarFicha(); } });
+    nombre = el("div", { class: "ficha__renombrar" }, entrada,
+      el("button", { class: "boton boton--principal boton--pequeno", onclick: guardar, text: "Guardar" }),
+      el("button", { class: "boton boton--secundario boton--pequeno", onclick: () => { ficha.renombrando = false; pintarFicha(); }, text: "Cancelar" }));
+    requestAnimationFrame(() => { entrada.focus(); entrada.select(); });
+  } else {
+    nombre = el("h2", { id: "ficha-nombre", text: d.id });
+  }
+
+  const tiles = d.muestras.map((m, i) => el("figure", { class: `muestra${m.principal ? " muestra--principal" : ""}` },
+    el("div", { class: "cara__marco" },
+      m.foto ? el("img", { src: m.foto, alt: `Muestra ${i + 1} de ${d.id}`, loading: "lazy" })
+             : el("div", { class: "muestra__sin-foto", text: "Sin foto (inscrita antes de que se guardaran)" })),
+    m.principal ? el("span", { class: "muestra__insignia", text: "Principal" }) : null,
+    el("figcaption", {},
+      el("span", { text: `Muestra ${i + 1}` }),
+      el("span", { class: "muestra__acciones" },
+        m.foto && !m.principal ? el("button", { class: "muestra__boton", title: "Usar como foto principal", "aria-label": "Usar como foto principal", onclick: () => fijarPrincipal(m.clave) }, icono("estrella")) : null,
+        el("button", { class: "muestra__boton muestra__boton--borrar", title: "Borrar esta muestra", "aria-label": `Borrar la muestra ${i + 1}`, onclick: () => borrarMuestra(m.clave) }, icono("papelera"))))));
+
+  tiles.push(lleno
+    ? el("div", { class: "muestra muestra--anadir muestra--lleno" }, el("p", { text: `Máximo de ${d.max_muestras} muestras` }))
+    : tileAnadir());
+
+  $("#ficha-contenido").replaceChildren(
+    el("header", { class: "ficha__cabecera" },
+      portada,
+      el("div", { class: "ficha__datos" },
+        el("p", { class: "antetitulo", text: "Ficha de la persona" }),
+        nombre,
+        el("p", { class: "texto-suave", text: `${d.muestras.length} muestra${d.muestras.length > 1 ? "s" : ""} de ${d.max_muestras} posibles · se compara con la más parecida` }),
+        el("div", { class: "acciones" },
+          ficha.renombrando ? null : el("button", { class: "boton boton--secundario boton--pequeno", onclick: () => { ficha.renombrando = true; pintarFicha(); }, text: "Cambiar nombre" }),
+          el("button", { class: "boton boton--secundario boton--pequeno", text: "Verificar con una foto", onclick: () => {
+            $("#ficha").close();
+            $("#nombre").value = d.id;
+            cambiarModo("verificar");
+            window.scrollTo({ top: $("#vista-operacion").offsetTop - 16, behavior: reduceMovimiento ? "auto" : "smooth" });
+            avisar(`Suelta una foto para comprobar si es ${d.id}`);
+          } }))),
+      el("button", { class: "ficha__cerrar", "aria-label": "Cerrar", onclick: () => $("#ficha").close() }, icono("no"))),
+    el("h3", { class: "ficha__seccion", text: "Fotos guardadas (muestras)" }),
+    el("p", { class: "texto-suave ficha__ayuda", text: "Cada muestra es un template distinto. Tener varias fotos (con luz, gafas o ángulos diferentes) ayuda a reconocerla mejor." }),
+    el("div", { class: "muestras" }, tiles),
+    el("footer", { class: "ficha__pie" },
+      el("button", { class: "boton boton--peligro", onclick: () => eliminarPersona({ id: d.id, muestras: d.muestras.length }, true) }, icono("papelera"), "Eliminar persona"),
+      el("button", { class: "boton boton--secundario", onclick: () => $("#ficha").close(), text: "Cerrar" })));
+}
+
+/** Casilla para añadir otra foto: soltar/elegir ► analizar ► confirmar ► inscribir. */
+function tileAnadir() {
+  const a = ficha.anadiendo;
+
+  if (a?.estado === "analizando") {
+    return el("div", { class: "muestra muestra--anadir" }, el("span", { class: "girando--azul" }), el("p", { text: "Buscando la cara…" }));
+  }
+  if (a?.estado === "revisar") {
+    return el("div", { class: "muestra muestra--revisar" },
+      el("div", { class: "cara__marco" }, el("img", { src: a.respuesta.retrato || a.respuesta.cara_alineada, alt: "Cara encontrada" })),
+      el("p", { text: `¿Añadir esta cara a ${ficha.datos.id}?` }),
+      el("div", { class: "muestra__confirmar" },
+        el("button", { class: "boton boton--principal boton--pequeno", onclick: confirmarAnadir, text: "Añadir" }),
+        el("button", { class: "boton boton--secundario boton--pequeno", onclick: () => abrirEnInscribir(a.archivo), text: "No es, la marco yo" })));
+  }
+  if (a?.estado === "error") {
+    return el("div", { class: "muestra muestra--anadir muestra--error" },
+      el("p", { text: a.mensaje }),
+      el("button", { class: "boton boton--secundario boton--pequeno", onclick: () => abrirEnInscribir(a.archivo), text: "Marcar la cara a mano" }),
+      el("button", { class: "boton boton--enlace", onclick: () => { ficha.anadiendo = null; pintarFicha(); }, text: "Probar otra" }));
+  }
+  const casilla = el("button", { class: "muestra muestra--anadir", onclick: () => $("#selector-ficha").click() },
+    icono("mas"), el("b", { text: "Añadir foto" }), el("small", { text: "Suelta una foto o haz clic" }));
+  ["dragenter", "dragover"].forEach((t) => casilla.addEventListener(t, (e) => { e.preventDefault(); casilla.classList.add("encima"); }));
+  ["dragleave", "drop"].forEach((t) => casilla.addEventListener(t, () => casilla.classList.remove("encima")));
+  casilla.addEventListener("drop", (e) => {
+    e.preventDefault();
+    const archivo = [...(e.dataTransfer?.files || [])].find((f) => f.type.startsWith("image/"));
+    if (archivo) analizarParaFicha(archivo);
+  });
+  return casilla;
+}
+
+async function analizarParaFicha(archivo) {
+  ficha.anadiendo = { estado: "analizando", archivo };
+  pintarFicha();
+  let r;
+  try {
+    r = await api("/api/analizar", {
+      method: "POST",
+      headers: { "Content-Type": archivo.type || "application/octet-stream", "X-JumeX-Lens": "1" },
+      body: archivo,
+    });
+  } catch (e) {
+    r = { ok: false, error: { error: "red", mensaje: e.message } };
+  }
+  if (r.ok) ficha.anadiendo = { estado: "revisar", archivo, respuesta: r };
+  else ficha.anadiendo = { estado: "error", archivo, mensaje: ERRORES[r.error?.error]?.[1] || r.error?.mensaje || "No se pudo analizar" };
+  pintarFicha();
+}
+
+async function confirmarAnadir() {
+  const { archivo, respuesta } = ficha.anadiendo;
+  const elegida = (respuesta.detecciones || []).find((d) => d.elegida);
+  const caja = elegida ? elegida.caja : respuesta.region;
+  ficha.anadiendo = { estado: "analizando", archivo };
+  pintarFicha();
+  const parametros = new URLSearchParams({ id: ficha.datos.id });
+  if (caja) parametros.set("caja", caja.join(","));
+  const r = await api(`/api/inscribir?${parametros}`, {
+    method: "POST",
+    headers: { "Content-Type": archivo.type || "application/octet-stream", "X-JumeX-Lens": "1" },
+    body: archivo,
+  });
+  ficha.anadiendo = null;
+  if (r.ok) avisar(`Foto añadida: ${r.resultado.id} tiene ${r.resultado.muestras} muestras`);
+  else avisar(ERRORES[r.error?.error]?.[1] || r.error?.mensaje || "No se pudo añadir");
+  await recargarFicha();
+  tras_editar();
+}
+
+/** Para casos difíciles: llevar la foto a la pestaña Inscribir, donde se puede marcar la cara. */
+function abrirEnInscribir(archivo) {
+  const id = ficha.datos.id;
+  $("#ficha").close();
+  $("#nombre").value = id;
+  cambiarModo("inscribir");
+  window.scrollTo({ top: $("#vista-operacion").offsetTop - 16, behavior: reduceMovimiento ? "auto" : "smooth" });
+  recibirArchivo(archivo);
+}
+
+async function fijarPrincipal(clave) {
+  const r = await api(`/api/persona/principal?id=${encodeURIComponent(ficha.datos.id)}&clave=${clave}`,
+    { method: "POST", headers: { "X-JumeX-Lens": "1" } });
+  if (!r.ok) { avisar(r.error?.mensaje || "No se pudo cambiar"); return; }
+  ficha.datos = r;
+  pintarFicha();
+  tras_editar();
+}
+
+async function borrarMuestra(clave) {
+  const d = ficha.datos;
+  const ultima = d.muestras.length === 1;
+  const pregunta = ultima
+    ? `Es la única muestra de ${d.id}: si la borras, ${d.id} desaparece de la base de datos.\n\n¿Continuar?`
+    : `¿Borrar esta muestra de ${d.id}?\n\nNo se puede deshacer.`;
+  if (!confirm(pregunta)) return;
+  const r = await api(`/api/muestras?id=${encodeURIComponent(d.id)}&clave=${clave}`,
+    { method: "DELETE", headers: { "X-JumeX-Lens": "1" } });
+  if (!r.ok) { avisar(r.error?.mensaje || "No se pudo borrar"); return; }
+  if (r.resultado.quedan === 0) {
+    $("#ficha").close();
+    avisar(`${d.id} eliminado/a de la base de datos`);
+  } else {
+    avisar("Muestra borrada");
+    await recargarFicha();
+  }
+  tras_editar();
+}
+
+async function eliminarPersona(p, desdeFicha = false) {
   const muestras = p.muestras > 1 ? ` y sus ${p.muestras} muestras` : "";
   if (!confirm(`¿Eliminar a ${p.id}${muestras} de la base de datos?\n\nNo se puede deshacer.`)) return;
   try {
     const r = await api(`/api/personas?id=${encodeURIComponent(p.id)}`, { method: "DELETE", headers: { "X-JumeX-Lens": "1" } });
     if (!r.ok) throw new Error(r.error?.mensaje || "error");
     if (estado.inscritoReciente === p.id) estado.inscritoReciente = null;
+    if (desdeFicha) $("#ficha").close();
     avisar(`${p.id} eliminado/a de la base de datos`);
   } catch (e) {
     avisar(`No se pudo eliminar: ${e.message}`);
@@ -1168,6 +1508,10 @@ async function eliminarPersona(p) {
 let temporizadorAviso = 0;
 function avisar(texto) {
   const aviso = $("#aviso");
+  // Un <dialog> modal tapa todo lo demás: con la ficha abierta, el aviso va dentro
+  const dialogo = $("#ficha");
+  const destino = dialogo.open ? dialogo : document.body;
+  if (aviso.parentElement !== destino) destino.append(aviso);
   aviso.textContent = texto;
   aviso.hidden = false;
   clearTimeout(temporizadorAviso);
@@ -1198,6 +1542,13 @@ function iniciar() {
   $("#boton-cancelar").addEventListener("click", (e) => { e.stopPropagation(); salirSeleccion(); });
   prepararSeleccion();
   $("#buscador").addEventListener("input", pintarBD);
+  const selectorFicha = $("#selector-ficha");
+  selectorFicha.addEventListener("change", () => {
+    if (selectorFicha.files[0]) analizarParaFicha(selectorFicha.files[0]);
+    selectorFicha.value = "";
+  });
+  const dialogo = $("#ficha");
+  dialogo.addEventListener("click", (e) => { if (e.target === dialogo) dialogo.close(); });  // clic fuera
 
   let temporizadorResize = 0;
   window.addEventListener("resize", () => {

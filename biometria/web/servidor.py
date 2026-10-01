@@ -7,7 +7,11 @@ API (las fotos se envían como cuerpo binario de la petición, sin multipart):
 
     GET  /api/estado                        extractor, umbrales, nº de personas e integridad
     GET  /api/personas                      [{id, muestras, foto}]
-    GET  /api/caras/<clave>.jpg             retrato de una persona
+    GET  /api/persona?id=<id>               ficha: muestras con su foto
+    GET  /api/caras/<persona>/<muestra>.jpg foto de una muestra (o /api/caras/<persona>.jpg)
+    POST /api/persona/principal?id=&clave=  elige la foto principal
+    POST /api/persona/renombrar?id=&nuevo=  cambia el nombre
+    DELETE /api/muestras?id=<id>&clave=<c>  borra una muestra
     POST /api/analizar                      cuerpo: la foto (solo el pipeline, no toca la BD)
     POST /api/verificar?id=<id>             cuerpo: la foto
     POST /api/identificar                   cuerpo: la foto
@@ -38,13 +42,23 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from biometria.config import RAIZ_REPO, cargar_config
-from biometria.errores import ErrorBiometrico, IdInvalido
+from biometria.bd import validar_id
+from biometria.errores import ErrorBiometrico, IdInvalido, MuestraNoEncontrada
 from biometria.sistema import SistemaBiometrico
-from biometria.web.analisis import Analisis, Galeria, a_data_url, analizar, retrato_de_analisis
+from biometria.web.analisis import (
+    Analisis,
+    Galeria,
+    a_data_url,
+    analizar,
+    analizar_todas,
+    retrato,
+    retrato_de_analisis,
+)
 
 CARPETA_ESTATICOS = Path(__file__).resolve().parent / "static"
 CONFIG_POR_DEFECTO = RAIZ_REPO / "config_lens.yaml"
 N_CANDIDATOS = 3
+LADO_RETRATO_GRUPO = 192
 HOSTS_PERMITIDOS = {"127.0.0.1", "localhost", "[::1]"}
 
 
@@ -58,13 +72,33 @@ class Aplicacion:
         self.sistema.detector  # carga YuNet ya: si falta el modelo, falla al arrancar
         self.galeria = Galeria(self.cfg.bd.ruta.parent / "caras")
         self.lock = threading.Lock()
+        try:
+            self.galeria.migrar(self.sistema.bd.claves_por_id())
+        except ErrorBiometrico:
+            pass  # BD rota: /api/estado lo enseñará
 
     # ------------------------------------------------------------------ #
-    def url_foto(self, id_persona: str) -> str | None:
-        if not self.galeria.existe(id_persona):
+    # Fotos de la galería
+    # ------------------------------------------------------------------ #
+    def url_muestra(self, id_persona: str, clave_muestra: str) -> str | None:
+        if not self.galeria.tiene_foto(id_persona, clave_muestra):
             return None
-        return f"/api/caras/{self.galeria.clave(id_persona)}.jpg"
+        return f"/api/caras/{self.galeria.clave(id_persona)}/{clave_muestra}.jpg"
 
+    def url_foto(self, id_persona: str, claves: list[str] | None = None) -> str | None:
+        """Foto principal: la muestra elegida, la primera con foto o el retrato antiguo."""
+        if claves is None:
+            claves = self.sistema.bd.claves_por_id().get(id_persona, [])
+        principal = self.galeria.principal(id_persona, claves)
+        if principal is not None:
+            return self.url_muestra(id_persona, principal)
+        if self.galeria.ruta_legado(id_persona).is_file():
+            return f"/api/caras/{self.galeria.clave(id_persona)}.jpg"
+        return None
+
+    # ------------------------------------------------------------------ #
+    # Consultas
+    # ------------------------------------------------------------------ #
     def estado(self) -> dict:
         datos = {
             "extractor": self.sistema.extractor.nombre,
@@ -72,25 +106,70 @@ class Aplicacion:
             "umbrales": {"verificacion": self.cfg.umbrales.verificacion,
                          "identificacion": self.cfg.umbrales.identificacion},
             "agregacion": self.cfg.bd.agregacion,
+            "max_muestras": self.cfg.limites.max_muestras_por_id,
         }
         try:
-            agrupadas = self.sistema.bd.por_id()
-            datos.update(integridad="ok", personas=len(agrupadas),
-                         muestras=sum(len(t) for t in agrupadas.values()))
+            claves = self.sistema.bd.claves_por_id()
+            datos.update(integridad="ok", personas=len(claves),
+                         muestras=sum(len(c) for c in claves.values()))
         except ErrorBiometrico as e:
             datos.update(integridad=e.codigo, mensaje=e.mensaje, personas=0, muestras=0)
         return datos
 
     def personas(self) -> dict:
-        agrupadas = self.sistema.bd.por_id()
+        claves = self.sistema.bd.claves_por_id()
         return {"personas": [
-            {"id": id_persona, "muestras": len(templates), "foto": self.url_foto(id_persona)}
-            for id_persona, templates in sorted(agrupadas.items(), key=lambda p: p[0].casefold())
+            {"id": id_persona, "muestras": len(c), "foto": self.url_foto(id_persona, c)}
+            for id_persona, c in sorted(claves.items(), key=lambda p: p[0].casefold())
         ]}
 
+    def persona(self, id_persona: str) -> dict:
+        """Ficha de una persona: todas sus muestras con su foto (si la hay)."""
+        id_persona = validar_id(id_persona)
+        claves = [c for c, _ in self.sistema.bd.muestras_de(id_persona)]
+        principal = self.galeria.principal(id_persona, claves)
+        return {"ok": True, "id": id_persona, "foto": self.url_foto(id_persona, claves),
+                "max_muestras": self.cfg.limites.max_muestras_por_id,
+                "muestras": [{"clave": c, "foto": self.url_muestra(id_persona, c),
+                              "principal": c == principal} for c in claves]}
+
+    # ------------------------------------------------------------------ #
+    # Edición de la BD
+    # ------------------------------------------------------------------ #
+    def eliminar(self, id_persona: str) -> dict:
+        with self.lock:
+            borradas = self.sistema.bd.eliminar(id_persona)
+            self.galeria.eliminar(id_persona)
+            return {"ok": True, "resultado": {"id": validar_id(id_persona), "muestras_borradas": borradas}}
+
+    def eliminar_muestra(self, id_persona: str, clave: str) -> dict:
+        with self.lock:
+            quedan = self.sistema.bd.eliminar_muestra(id_persona, clave)
+            if quedan == 0:
+                self.galeria.eliminar(id_persona)
+            else:
+                self.galeria.eliminar_muestra(id_persona, clave)
+            return {"ok": True, "resultado": {"id": validar_id(id_persona), "quedan": quedan}}
+
+    def fijar_principal(self, id_persona: str, clave: str) -> dict:
+        with self.lock:
+            claves = [c for c, _ in self.sistema.bd.muestras_de(id_persona)]
+            if clave not in claves or not self.galeria.tiene_foto(id_persona, clave):
+                raise MuestraNoEncontrada("Esa muestra no existe o no tiene foto")
+            self.galeria.fijar_principal(id_persona, clave)
+            return self.persona(id_persona)
+
+    def renombrar(self, id_persona: str, nuevo: str) -> dict:
+        with self.lock:
+            claves = self.sistema.bd.renombrar(id_persona, nuevo)
+            self.galeria.renombrar(id_persona, nuevo, claves)
+            return self.persona(nuevo)
+
+    # ------------------------------------------------------------------ #
+    # Operaciones con foto
     # ------------------------------------------------------------------ #
     def _respuesta_analisis(self, analisis: Analisis) -> dict:
-        """Lo común a las tres operaciones: detecciones, cara alineada, template..."""
+        """Lo común a todas las operaciones: detecciones, cara alineada, template..."""
         respuesta: dict = {"ok": analisis.ok, "tiempos_ms": analisis.tiempos_ms,
                            "seleccion": analisis.seleccion,
                            "region": list(analisis.region) if analisis.region else None}
@@ -112,8 +191,7 @@ class Aplicacion:
             if imagen_retrato is not None:
                 respuesta["retrato"] = a_data_url(imagen_retrato, ".jpg")
         if analisis.template is not None:
-            respuesta["template"] = {"dimension": int(analisis.template.size),
-                                     "valores": [round(float(v), 5) for v in analisis.template]}
+            respuesta["template"] = _template_json(analisis.template)
         return respuesta
 
     def _error(self, respuesta: dict, error: ErrorBiometrico) -> dict:
@@ -125,6 +203,9 @@ class Aplicacion:
         with self.lock:
             analisis = analizar(self.sistema, foto, region)
             respuesta = self._respuesta_analisis(analisis)
+            # Identificar con varias caras: se comprueba cada una (salvo cara marcada a mano)
+            if operacion == "identificar" and region is None and len(analisis.detecciones) >= 2:
+                return self._identificar_varias(analisis, respuesta)
             if analisis.error is not None:
                 return self._error(respuesta, analisis.error)
             inicio = time.perf_counter()
@@ -138,11 +219,10 @@ class Aplicacion:
     def _analizar(self, _id: None, _analisis: Analisis) -> dict:
         return {}
 
-    def eliminar(self, id_persona: str) -> dict:
-        with self.lock:
-            borradas = self.sistema.bd.eliminar(id_persona)
-            self.galeria.eliminar(id_persona)
-            return {"ok": True, "resultado": {"id": id_persona.strip(), "muestras_borradas": borradas}}
+    def _candidatos(self, template, n: int = N_CANDIDATOS) -> list[dict]:
+        claves = self.sistema.bd.claves_por_id()
+        return [{"id": i, "puntuacion": p, "foto": self.url_foto(i, claves.get(i, []))}
+                for i, p in self.sistema.ranking(template, n)]
 
     def _verificar(self, id_persona: str, analisis: Analisis) -> dict:
         r = self.sistema.verificar_t(id_persona, analisis.template)
@@ -151,17 +231,76 @@ class Aplicacion:
 
     def _identificar(self, _id: None, analisis: Analisis) -> dict:
         r = self.sistema.identificar_t(analisis.template)
-        candidatos = [{"id": i, "puntuacion": p, "foto": self.url_foto(i)}
-                      for i, p in self.sistema.ranking(analisis.template, N_CANDIDATOS)]
         return {"id": r.id, "identificado": r.identificado, "puntuacion": r.puntuacion,
                 "umbral": r.umbral, "foto": self.url_foto(r.id) if r.id else None,
-                "candidatos": candidatos, "personas": len(self.sistema.bd.ids())}
+                "candidatos": self._candidatos(analisis.template),
+                "personas": len(self.sistema.bd.ids())}
+
+    def _identificar_varias(self, analisis: Analisis, respuesta: dict) -> dict:
+        """Una foto con varias personas: identifica cada cara por separado."""
+        inicio = time.perf_counter()
+        caras = analizar_todas(self.sistema, analisis)
+        respuesta["tiempos_ms"]["extraccion"] = round((time.perf_counter() - inicio) * 1000, 1)
+        validas = [c for c in caras if c.template is not None]
+        if not validas:
+            return self._error(respuesta, caras[0].error)
+
+        inicio = time.perf_counter()
+        umbral = self.cfg.umbrales.identificacion
+        lista = []
+        for numero, cara in enumerate(caras, start=1):
+            d = cara.deteccion
+            item = {"numero": numero, "caja": list(map(int, d.caja)),
+                    "landmarks": d.landmarks.round(1).tolist(), "confianza": round(d.confianza, 4),
+                    "retrato": a_data_url(retrato(analisis.imagen, d.landmarks, LADO_RETRATO_GRUPO), ".jpg")}
+            if cara.template is None:
+                item.update(estado="descartada", error=cara.error.a_dict())
+            else:
+                # Misma regla que identificar_t: el mejor candidato, si supera el umbral
+                candidatos = self._candidatos(cara.template)
+                mejor = candidatos[0] if candidatos else None
+                conocido = mejor is not None and mejor["puntuacion"] >= umbral
+                item.update(estado="identificada" if conocido else "desconocida",
+                            id=mejor["id"] if conocido else None,
+                            puntuacion=mejor["puntuacion"] if mejor else None,
+                            foto=mejor["foto"] if conocido else None, candidatos=candidatos)
+            lista.append(item)
+
+        # El pipeline de la izquierda enseña la primera cara válida
+        primera = validas[0]
+        respuesta.setdefault("cara_alineada", a_data_url(primera.procesada.cara))
+        respuesta.setdefault("nitidez", round(primera.procesada.nitidez, 1))
+        respuesta.setdefault("template", _template_json(primera.template))
+        respuesta.pop("error", None)
+        for det in respuesta["detecciones"]:
+            det["elegida"] = False
+        respuesta.update(ok=True, multiple=True, caras=lista, resultado={
+            "multiple": True, "umbral": umbral, "personas": len(self.sistema.bd.ids()),
+            "identificadas": sum(c["estado"] == "identificada" for c in lista),
+            "desconocidas": sum(c["estado"] == "desconocida" for c in lista),
+            "descartadas": sum(c["estado"] == "descartada" for c in lista),
+        })
+        respuesta["tiempos_ms"]["comparacion"] = round((time.perf_counter() - inicio) * 1000, 1)
+        return respuesta
 
     def _inscribir(self, id_persona: str, analisis: Analisis) -> dict:
         r = self.sistema.inscribir_t(id_persona, analisis.template)
-        retrato_nuevo = self.galeria.guardar_de_analisis(r.id, analisis)
+        clave = self.sistema.bd.muestras_de(r.id)[-1][0]  # la recién añadida va al final
+        self.galeria.guardar_muestra_de_analisis(r.id, clave, analisis)
         return {"id": r.id, "muestras": r.muestras, "nueva_persona": r.muestras == 1,
-                "retrato_nuevo": retrato_nuevo, "foto": self.url_foto(r.id)}
+                "clave": clave, "foto": self.url_foto(r.id)}
+
+
+def _estado_http(error: ErrorBiometrico) -> int:
+    if error.codigo in ("id_no_inscrito", "muestra_no_encontrada"):
+        return HTTPStatus.NOT_FOUND
+    if error.codigo == "id_invalido":
+        return HTTPStatus.BAD_REQUEST
+    return HTTPStatus.CONFLICT
+
+
+def _template_json(template) -> dict:
+    return {"dimension": int(template.size), "valores": [round(float(v), 5) for v in template]}
 
 
 class Manejador(BaseHTTPRequestHandler):
@@ -221,14 +360,20 @@ class Manejador(BaseHTTPRequestHandler):
             if ruta == "/api/personas":
                 with self.app.lock:
                     return self._json(self.app.personas())
-            if ruta.startswith("/api/caras/") and ruta.endswith(".jpg"):
-                fichero = self.app.galeria.ruta_por_clave(ruta[len("/api/caras/"):-len(".jpg")])
+            if ruta == "/api/persona":
+                with self.app.lock:
+                    return self._json(self.app.persona(self._parametro("id")))
+            if ruta.startswith("/api/caras/"):
+                fichero = self.app.galeria.ruta_por_url(ruta[len("/api/caras/"):].split("/"))
                 if fichero is None:
                     return self._fallo(HTTPStatus.NOT_FOUND, "no_encontrado", "No hay retrato")
                 return self._enviar(HTTPStatus.OK, fichero.read_bytes(), "image/jpeg")
         except ErrorBiometrico as e:
-            return self._json({"ok": False, "error": e.a_dict()}, HTTPStatus.CONFLICT)
+            return self._json({"ok": False, "error": e.a_dict()}, _estado_http(e))
         self._fallo(HTTPStatus.NOT_FOUND, "no_encontrado", f"No existe {ruta}")
+
+    def _parametro(self, nombre: str) -> str:
+        return (parse_qs(urlsplit(self.path).query).get(nombre) or [""])[0]
 
     def _estatico(self, nombre: str) -> None:
         # Lista blanca: solo ficheros que existen directamente en static/ (sin subcarpetas ni '..')
@@ -259,6 +404,16 @@ class Manejador(BaseHTTPRequestHandler):
         if self.headers.get("X-JumeX-Lens") != "1":
             return self._fallo(HTTPStatus.FORBIDDEN, "cabecera_requerida", "Falta la cabecera X-JumeX-Lens")
         partes = urlsplit(self.path)
+        # Edición de la BD (sin foto)
+        if partes.path in ("/api/persona/principal", "/api/persona/renombrar"):
+            try:
+                if partes.path.endswith("principal"):
+                    datos = self.app.fijar_principal(self._parametro("id"), self._parametro("clave"))
+                else:
+                    datos = self.app.renombrar(self._parametro("id"), self._parametro("nuevo"))
+            except ErrorBiometrico as e:
+                return self._json({"ok": False, "error": e.a_dict()}, _estado_http(e))
+            return self._json(datos)
         operacion = partes.path.removeprefix("/api/")
         if operacion not in ("analizar", "verificar", "identificar", "inscribir"):
             return self._fallo(HTTPStatus.NOT_FOUND, "no_encontrado", f"No existe {partes.path}")
@@ -286,15 +441,15 @@ class Manejador(BaseHTTPRequestHandler):
             return self._fallo(HTTPStatus.FORBIDDEN, "host_no_permitido", "Solo se admite localhost")
         if self.headers.get("X-JumeX-Lens") != "1":
             return self._fallo(HTTPStatus.FORBIDDEN, "cabecera_requerida", "Falta la cabecera X-JumeX-Lens")
-        partes = urlsplit(self.path)
-        if partes.path != "/api/personas":
-            return self._fallo(HTTPStatus.NOT_FOUND, "no_encontrado", f"No existe {partes.path}")
-        id_persona = (parse_qs(partes.query).get("id") or [""])[0]
+        ruta = urlsplit(self.path).path
         try:
-            self._json(self.app.eliminar(id_persona))
+            if ruta == "/api/personas":
+                return self._json(self.app.eliminar(self._parametro("id")))
+            if ruta == "/api/muestras":
+                return self._json(self.app.eliminar_muestra(self._parametro("id"), self._parametro("clave")))
         except ErrorBiometrico as e:
-            self._json({"ok": False, "error": e.a_dict()},
-                       HTTPStatus.NOT_FOUND if e.codigo == "id_no_inscrito" else HTTPStatus.CONFLICT)
+            return self._json({"ok": False, "error": e.a_dict()}, _estado_http(e))
+        self._fallo(HTTPStatus.NOT_FOUND, "no_encontrado", f"No existe {ruta}")
 
 
 def crear_servidor(ruta_config: Path, host: str = "127.0.0.1", puerto: int = 8000) -> ThreadingHTTPServer:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -140,6 +141,37 @@ def analizar(sistema: SistemaBiometrico, foto, region=None) -> Analisis:
     return analisis
 
 
+# Identificación múltiple: como mucho se comprueban las caras más grandes
+MAX_CARAS_IDENTIFICAR = 12
+
+
+@dataclass
+class CaraDeGrupo:
+    """Una de las caras de una foto con varias personas."""
+
+    deteccion: Deteccion
+    procesada: CaraProcesada | None = None
+    template: np.ndarray | None = None
+    error: ErrorBiometrico | None = None  # por qué no se pudo comprobar (pequeña, borrosa...)
+
+
+def analizar_todas(sistema: SistemaBiometrico, analisis: Analisis,
+                   maximo: int = MAX_CARAS_IDENTIFICAR) -> list[CaraDeGrupo]:
+    """Alinea y extrae el template de cada cara detectada (las `maximo` más grandes),
+    ordenadas de izquierda a derecha para numerarlas como se leen en la foto."""
+    caras = []
+    for deteccion in analisis.detecciones[:maximo]:
+        cara = CaraDeGrupo(deteccion)
+        try:
+            cara.procesada = sistema.detector.procesar_deteccion(analisis.imagen, deteccion)
+            cara.template = sistema.extractor.extraer(cara.procesada.cara)
+        except ErrorBiometrico as e:
+            cara.error = e
+        caras.append(cara)
+    caras.sort(key=lambda c: c.deteccion.caja[0])
+    return caras
+
+
 def retrato(imagen: np.ndarray, landmarks: np.ndarray, lado: int = LADO_RETRATO) -> np.ndarray:
     """Recorte cuadrado y alineado con margen, para mostrar (no para reconocer)."""
     destino = (PLANTILLA_LANDMARKS_112 / 112.0 - 0.5) * ESCALA_RETRATO * lado + lado / 2
@@ -179,31 +211,45 @@ def a_data_url(imagen: np.ndarray, formato: str = ".png") -> str:
 
 
 class Galeria:
-    """Retratos de las personas inscritas, uno por persona, en <carpeta>/<hash>.jpg.
+    """Fotos de las personas inscritas, SOLO para mostrarlas en la web.
 
-    El nombre del fichero es un hash del id: el id nunca forma parte de una ruta,
-    así que no hay forma de salirse de la carpeta con un id malicioso.
+        <carpeta>/<persona>/<muestra>.jpg   una foto por muestra de la BD
+        <carpeta>/<persona>/principal       clave de la muestra que hace de foto principal
+        <carpeta>/<persona>.jpg             retrato de versiones anteriores (una por persona)
+
+    <persona> es un hash del id y <muestra> la clave de la muestra en la BD
+    (BaseDatos.clave_muestra): ningún nombre de fichero sale de lo que escribe
+    el usuario, así que no hay forma de salirse de la carpeta.
     """
+
+    LONGITUD_PERSONA = 20
+    LONGITUD_MUESTRA = 16
 
     def __init__(self, carpeta: Path):
         self.carpeta = carpeta
 
     @staticmethod
     def clave(id_persona: str) -> str:
-        return hashlib.sha256(validar_id(id_persona).encode("utf-8")).hexdigest()[:20]
+        return hashlib.sha256(validar_id(id_persona).encode("utf-8")).hexdigest()[:Galeria.LONGITUD_PERSONA]
 
-    def ruta(self, id_persona: str) -> Path:
+    @staticmethod
+    def _es_hex(texto: str, longitud: int) -> bool:
+        return len(texto) == longitud and all(c in "0123456789abcdef" for c in texto)
+
+    def carpeta_persona(self, id_persona: str) -> Path:
+        return self.carpeta / self.clave(id_persona)
+
+    def ruta_legado(self, id_persona: str) -> Path:
         return self.carpeta / f"{self.clave(id_persona)}.jpg"
 
-    def existe(self, id_persona: str) -> bool:
-        return self.ruta(id_persona).is_file()
+    def ruta_muestra(self, id_persona: str, clave_muestra: str) -> Path:
+        if not self._es_hex(clave_muestra, self.LONGITUD_MUESTRA):
+            raise ValueError("clave de muestra no válida")
+        return self.carpeta_persona(id_persona) / f"{clave_muestra}.jpg"
 
-    def guardar(self, id_persona: str, imagen: np.ndarray, sobrescribir: bool = False) -> bool:
-        """Guarda el retrato si no había uno (o si se pide sobrescribir)."""
-        destino = self.ruta(id_persona)
-        if destino.is_file() and not sobrescribir:
-            return False
-        self.carpeta.mkdir(parents=True, exist_ok=True)
+    # ------------------------------------------------------------------ #
+    def _escribir(self, destino: Path, imagen: np.ndarray) -> bool:
+        destino.parent.mkdir(parents=True, exist_ok=True)
         ok, datos = cv2.imencode(".jpg", imagen, [cv2.IMWRITE_JPEG_QUALITY, 92])
         if ok:
             temporal = destino.with_suffix(".tmp")
@@ -211,16 +257,79 @@ class Galeria:
             temporal.replace(destino)
         return bool(ok)
 
-    def guardar_de_analisis(self, id_persona: str, analisis: Analisis) -> bool:
+    def guardar_muestra(self, id_persona: str, clave_muestra: str, imagen: np.ndarray) -> bool:
+        return self._escribir(self.ruta_muestra(id_persona, clave_muestra), imagen)
+
+    def guardar_muestra_de_analisis(self, id_persona: str, clave_muestra: str, analisis: Analisis) -> bool:
         imagen = retrato_de_analisis(analisis)
-        return imagen is not None and self.guardar(id_persona, imagen)
+        return imagen is not None and self.guardar_muestra(id_persona, clave_muestra, imagen)
 
+    def tiene_foto(self, id_persona: str, clave_muestra: str) -> bool:
+        return self.ruta_muestra(id_persona, clave_muestra).is_file()
+
+    def principal(self, id_persona: str, claves: list[str]) -> str | None:
+        """Clave de la muestra que hace de foto principal (la elegida, o la primera con foto)."""
+        fichero = self.carpeta_persona(id_persona) / "principal"
+        elegida = fichero.read_text(encoding="ascii").strip() if fichero.is_file() else None
+        if elegida in claves and self.tiene_foto(id_persona, elegida):
+            return elegida
+        return next((c for c in claves if self.tiene_foto(id_persona, c)), None)
+
+    def fijar_principal(self, id_persona: str, clave_muestra: str) -> None:
+        self.ruta_muestra(id_persona, clave_muestra)  # valida la clave
+        carpeta = self.carpeta_persona(id_persona)
+        carpeta.mkdir(parents=True, exist_ok=True)
+        (carpeta / "principal").write_text(clave_muestra, encoding="ascii")
+
+    # ------------------------------------------------------------------ #
     def eliminar(self, id_persona: str) -> None:
-        self.ruta(id_persona).unlink(missing_ok=True)
+        shutil.rmtree(self.carpeta_persona(id_persona), ignore_errors=True)
+        self.ruta_legado(id_persona).unlink(missing_ok=True)
 
-    def ruta_por_clave(self, clave: str) -> Path | None:
-        """Ruta del retrato a partir de la clave de la URL (solo hex de 20)."""
-        if len(clave) != 20 or any(c not in "0123456789abcdef" for c in clave):
-            return None
-        ruta = self.carpeta / f"{clave}.jpg"
-        return ruta if ruta.is_file() else None
+    def eliminar_muestra(self, id_persona: str, clave_muestra: str) -> None:
+        self.ruta_muestra(id_persona, clave_muestra).unlink(missing_ok=True)
+
+    def renombrar(self, id_persona: str, nuevo: str, claves: dict[str, str]) -> None:
+        """Mueve las fotos al nuevo id; `claves` traduce las claves de muestra que cambian."""
+        origen, destino = self.carpeta_persona(id_persona), self.carpeta_persona(nuevo)
+        if origen == destino:
+            return
+        if origen.is_dir():
+            destino.mkdir(parents=True, exist_ok=True)
+            for fichero in origen.iterdir():
+                if fichero.suffix == ".jpg" and fichero.stem in claves:
+                    fichero.replace(destino / f"{claves[fichero.stem]}.jpg")
+            principal = origen / "principal"
+            if principal.is_file():
+                antigua = principal.read_text(encoding="ascii").strip()
+                (destino / "principal").write_text(claves.get(antigua, antigua), encoding="ascii")
+            shutil.rmtree(origen, ignore_errors=True)
+        if self.ruta_legado(id_persona).is_file():
+            self.ruta_legado(id_persona).replace(self.ruta_legado(nuevo))
+
+    def migrar(self, muestras_por_id: dict[str, list[str]]) -> int:
+        """Pasa los retratos antiguos (uno por persona) a foto de muestra cuando la
+        persona tiene una sola muestra: entonces es seguro que es la suya."""
+        migradas = 0
+        for id_persona, claves in muestras_por_id.items():
+            legado = self.ruta_legado(id_persona)
+            if len(claves) == 1 and legado.is_file() and not self.tiene_foto(id_persona, claves[0]):
+                destino = self.ruta_muestra(id_persona, claves[0])
+                destino.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(legado, destino)
+                migradas += 1
+        return migradas
+
+    # ------------------------------------------------------------------ #
+    def ruta_por_url(self, partes: list[str]) -> Path | None:
+        """Fichero a partir de la URL /api/caras/<persona>[/<muestra>].jpg (solo claves hex)."""
+        if len(partes) == 1 and partes[0].endswith(".jpg"):
+            persona = partes[0][:-4]
+            ruta = self.carpeta / f"{persona}.jpg" if self._es_hex(persona, self.LONGITUD_PERSONA) else None
+        elif len(partes) == 2 and partes[1].endswith(".jpg"):
+            persona, muestra = partes[0], partes[1][:-4]
+            ok = self._es_hex(persona, self.LONGITUD_PERSONA) and self._es_hex(muestra, self.LONGITUD_MUESTRA)
+            ruta = self.carpeta / persona / f"{muestra}.jpg" if ok else None
+        else:
+            ruta = None
+        return ruta if ruta is not None and ruta.is_file() else None

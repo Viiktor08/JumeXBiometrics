@@ -14,6 +14,7 @@ from biometria.errores import (
     IdNoInscrito,
     IntegridadBD,
     LimiteMuestras,
+    MuestraNoEncontrada,
     TemplateInvalido,
 )
 from biometria.extractores import ExtractorLBP
@@ -315,3 +316,30 @@ def test_no_se_puede_eliminar_en_una_bd_manipulada(bd, extractor):
     escribir_lineas(bd, lineas[:-1])
     with pytest.raises(IntegridadBD):
         bd.eliminar("Ana")
+
+
+def test_muestras_de_y_eliminar_una(bd, extractor):
+    bd_con_tres_filas(bd, extractor)
+    muestras = bd.muestras_de("Ana")
+    assert len(muestras) == 2 and muestras[0][0] != muestras[1][0]
+    clave = muestras[0][0]
+    assert bd.eliminar_muestra("Ana", clave) == 1
+    assert [c for c, _ in bd.muestras_de("Ana")] == [muestras[1][0]]
+    with pytest.raises(MuestraNoEncontrada):
+        bd.eliminar_muestra("Ana", clave)
+    with pytest.raises(IdNoInscrito):
+        bd.muestras_de("Pepe")
+
+
+@pytest.mark.parametrize("cifrar", [False, True])
+def test_renombrar(cfg_tmp, extractor, cifrar):
+    bd = BaseDatos(cfg_con(cfg_tmp, bd={"cifrar_templates": cifrar}), extractor)
+    bd_con_tres_filas(bd, extractor)
+    antes = bd.templates_de("Ana")
+    claves = bd.renombrar("Ana", "Ana López")
+    assert bd.ids() == ["Ana López", "Luis"]
+    assert all(np.array_equal(a, b) for a, b in zip(antes, bd.templates_de("Ana López")))
+    assert len(claves) == 2
+    assert (list(claves) == list(claves.values())) is (not cifrar)  # cifrados: claves nuevas
+    with pytest.raises(IdInvalido):
+        bd.renombrar("Luis", "Ana López")
