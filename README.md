@@ -20,7 +20,7 @@ de Docker), para que el grupo rival pueda ejecutarlo y atacarlo.
 | 1 | `setup-base` | Estructura, dependencias, Docker, configuración | ✅ |
 | 2 | `detector` | YuNet, alineado por ojos, control de calidad y demo de cámara | ✅ |
 | 3 | `extractor` | Interfaz de extractor y LBP provisional | ✅ |
-| 4 | `bd-csv` | Base de datos CSV con validación e integridad (HMAC) | ⏳ |
+| 4 | `bd-csv` | Base de datos CSV con validación e integridad (HMAC) | ✅ |
 | 5 | `sistema-cli` | `SistemaBiometrico` con los 9 métodos y la CLI | ⏳ |
 | 6 | `inscripcion-evaluacion` | Inscripción masiva; FAR/FRR/EER, DET/ROC, CMC | ⏳ |
 | 7 | `seguridad` | `THREAT_MODEL.md` y contramedidas | ⏳ |
@@ -164,6 +164,50 @@ cambiar radio, vecinos o rejilla apenas lo mejora (EER entre 37 y 39 %). **Con
 el umbral provisional de 0,5 se aceptaría a cualquiera** (FAR del 100 %): hay que
 calibrarlo en la fase 6 con las fotos del profesor.
 
+## Base de datos
+
+Los templates se guardan en `data/bd.csv` (fuera de git), una fila por muestra:
+
+```
+id,template,hmac
+Afton Smith,f32:BS+nOAAAAAAAAAAA...,4c1f9e...
+Afton Smith,f32:AAAgPwAAQD8AAAAA...,b72e04...
+Allyson Felix,f32:AADAPgAAAD8AAAA...,51d9aa...
+```
+
+- **`template`**: `f32:` + base64 de los 2891 float32 (little-endian), o `gcm:` +
+  base64 del template cifrado con AES-256-GCM si `bd.cifrar_templates: true`.
+- **`hmac`**: HMAC-SHA256 de la fila **junto con su posición y el número total de
+  filas**. Cambiar un template, cambiar un id, mover un template a otra persona,
+  borrar, duplicar o reordenar filas da `integridad_bd`.
+- Cada operación vuelve a leer y verificar el CSV entero, y la escritura es
+  atómica (fichero temporal + renombrado).
+- **Clave:** variable de entorno `BIOMETRIA_HMAC_KEY` (mínimo 32 caracteres) o
+  el fichero `data/clave_hmac.key`, que se genera solo, con permisos `600`, la
+  primera vez que se inscribe a alguien. **Si se pierde la clave, la BD no se
+  puede verificar** y hay que volver a inscribir.
+
+Para comprobar la integridad y ver quién está inscrito:
+
+```bash
+python -m biometria.bd
+# data/bd.csv: integridad OK · 41 personas · 41 muestras
+```
+
+Desde Python:
+
+```python
+from biometria.bd import BaseDatos
+
+bd = BaseDatos(cfg, extractor)
+bd.inscribir("Ana López", template)    # -> nº de muestras de Ana (máx. limites.max_muestras_por_id)
+bd.templates_de("Ana López")           # [template, ...]  (IdNoInscrito si no está)
+bd.por_id()                            # {id: [templates]}
+```
+
+Los ids deben empezar por letra o número y solo pueden llevar letras (con
+acentos y ñ), números, espacios y `. - _ '` (máximo 100 caracteres).
+
 ## Estructura del repositorio
 
 ```
@@ -173,6 +217,7 @@ calibrarlo en la fase 6 con las fotos del profesor.
 │   ├── imagen.py           carga segura de imágenes (límites de bytes y píxeles)
 │   ├── detector.py         YuNet + alineado + control de calidad
 │   ├── camara.py           demo en directo con la webcam
+│   ├── bd.py               base de datos CSV con HMAC y cifrado opcional
 │   ├── extractores/        extractores intercambiables
 │   │   ├── base.py         interfaz común: extraer, comparar, validar_template
 │   │   └── lbp.py          LBP uniforme por rejilla (provisional)
@@ -218,12 +263,15 @@ Decisiones tomadas donde el enunciado es ambiguo o deja libertad:
    Así se evita inscribir o verificar a la persona equivocada. Se puede cambiar
    a `mayor` para quedarse con la cara más grande.
 5. **Formato del CSV:** `id,template,hmac`, con una fila por muestra (varias
-   muestras por persona). El template va en base64 de float32 little-endian.
-   La puntuación frente a una persona es la máxima entre sus muestras
-   (configurable a media).
+   muestras por persona). El template va en base64 de float32 little-endian,
+   con un prefijo (`f32:` o `gcm:`) que dice si está cifrado, para que activar
+   el cifrado no rompa una BD ya creada. La puntuación frente a una persona es
+   la máxima entre sus muestras (configurable a media).
 6. **Integridad del CSV con HMAC-SHA256** (siempre activa) y **cifrado de
    templates con AES-GCM** (implementado pero desactivado por defecto con
-   `cifrar_templates: false`).
+   `cifrar_templates: false`). Las claves del HMAC y del cifrado se derivan
+   con HKDF de una única clave maestra. En el cifrado, el id va como dato
+   asociado: un template cifrado no se puede mover a otra persona.
 7. **Umbrales provisionales (0.5).** Se calibrarán con el script de evaluación
    cuando tengamos las fotos del profesor.
 8. **Versiones fijadas para Python 3.11:** numpy 2.4.x (la 2.5 ya exige 3.12) y
@@ -258,6 +306,23 @@ Decisiones tomadas donde el enunciado es ambiguo o deja libertad:
     interpolación, que aquí siempre cuentan como 1 (definición original de LBP)
     y en scikit-image dependen del redondeo.
 17. **`rejilla` es [columnas, filas]**, en el mismo orden que `tam_cara` ([ancho, alto]).
+
+18. **El HMAC de cada fila incluye su posición y el total de filas.** Con un HMAC
+    por fila sin más, un atacante con escritura podría borrar, duplicar o
+    reordenar filas sin que se notara. Así se detecta todo eso sin un segundo
+    fichero de firmas. El coste es volver a firmar todas las filas al inscribir,
+    algo despreciable con 51 personas.
+19. **Lo que la integridad NO detecta** (irá en `THREAT_MODEL.md`): volver a una
+    copia antigua completa del CSV (rollback) y borrar el fichero entero, que
+    equivale a una BD vacía. Es denegación de servicio, pero no permite
+    suplantar a nadie. Quien tenga la clave puede, por supuesto, firmar lo que
+    quiera.
+20. **Ids restringidos:** empiezan por letra o número (evita la inyección de
+    fórmulas al abrir el CSV con Excel: `=`, `+`, `-`, `@`), sin saltos de línea
+    ni caracteres de control, y normalizados a Unicode NFC para que "José"
+    escrito de dos formas sea el mismo id.
+21. **`bd.csv` y la clave se crean con permisos `600`**: solo los lee el usuario
+    que ejecuta el sistema.
 
 ## Problemas frecuentes
 
