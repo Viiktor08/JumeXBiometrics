@@ -1,0 +1,44 @@
+# Configuración del sistema biométrico JumeXBiometrics.
+#
+# Las rutas relativas se resuelven respecto a la carpeta de ESTE fichero.
+# Se puede usar otro fichero con la variable de entorno BIOMETRIA_CONFIG.
+#
+# OJO: los umbrales son PROVISIONALES. Se calibrarán con scripts/evaluar.py
+# (p. ej. en el punto EER o a un FAR objetivo) cuando tengamos las fotos.
+
+detector:
+  modelo: models/face_detection_yunet_2023mar.onnx
+  umbral_confianza: 0.8   # puntuación mínima de YuNet para aceptar una cara
+  umbral_nms: 0.3         # supresión de no-máximos entre detecciones solapadas
+  varias_caras: error     # "error" -> rechaza la foto | "mayor" -> usa la cara más grande
+
+preprocesado:
+  tam_cara: [112, 112]    # [ancho, alto] de la cara alineada que recibe el extractor
+
+calidad:
+  tam_min_cara: 60          # lado mínimo (px) de la caja de la cara en la imagen original
+  umbral_borrosidad: 50.0   # varianza del Laplaciano mínima sobre la cara alineada
+
+extractor:
+  nombre: lbp             # extractor registrado en biometria/extractores (lbp, y en el futuro arcface/mlbp/lda)
+  parametros:             # se pasan tal cual al constructor del extractor
+    radio: 1
+    puntos: 8
+    rejilla: [7, 7]
+
+bd:
+  ruta: data/bd.csv
+  # Clave HMAC para la integridad del CSV. Tiene prioridad la variable de
+  # entorno BIOMETRIA_HMAC_KEY; si no existe, se lee este fichero (fuera de git).
+  ruta_clave: data/clave_hmac.key
+  cifrar_templates: false   # true -> templates cifrados con AES-GCM en el CSV
+  agregacion: max           # cómo combinar varias muestras de una persona: max | media
+
+umbrales:
+  verificacion: 0.5         # puntuación mínima para aceptar en verificar*
+  identificacion: 0.5       # puntuación mínima para no devolver "desconocido"
+
+limites:
+  max_bytes_imagen: 10485760   # 10 MiB: fichero de imagen máximo aceptado
+  max_pixeles: 25000000        # 25 Mpx: protege frente a "bombas" de descompresión
+  max_muestras_por_id: 10      # muestras máximas por persona en la BD
