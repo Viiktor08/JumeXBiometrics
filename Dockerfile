@@ -13,9 +13,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Librerías del sistema que necesita OpenCV en una imagen slim.
-# (La variante headless no usa GUI, pero libgl1/libglib2.0-0 evitan errores
-#  de importación si alguna dependencia arrastra la versión completa.)
+# Librerías del sistema que necesita opencv-python (versión completa, por la
+# demo de cámara) para poder importarse en una imagen slim.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
