@@ -1,0 +1,947 @@
+/* JumeX Lens · lógica de la interfaz.
+   Sin dependencias. La API devuelve cada paso del pipeline (detecciones,
+   cara alineada, template, tiempos) y aquí se anima en ese orden. */
+"use strict";
+
+const $ = (sel, raiz = document) => raiz.querySelector(sel);
+const $$ = (sel, raiz = document) => [...raiz.querySelectorAll(sel)];
+const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
+const pct = (x) => `${Math.round(x * 100)}%`;
+const reduceMovimiento = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/** Crea un elemento: el("div", {class: "x", text: "hola"}, hijo1, hijo2) */
+function el(tag, attrs = {}, ...hijos) {
+  const nodo = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
+    if (k === "class") nodo.className = v;
+    else if (k === "text") nodo.textContent = v;
+    else if (k.startsWith("on")) nodo.addEventListener(k.slice(2), v);
+    else nodo.setAttribute(k, v === true ? "" : v);
+  }
+  for (const h of hijos.flat()) if (h != null) nodo.append(h);
+  return nodo;
+}
+
+function icono(nombre) {
+  const trazos = {
+    si: '<path d="M20 6 9 17l-5-5"/>',
+    no: '<path d="M18 6 6 18M6 6l12 12"/>',
+    duda: '<path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/><circle cx="12" cy="12" r="10"/>',
+    aviso: '<path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/>',
+    persona: '<circle cx="10" cy="8" r="4"/><path d="M3 21a7 7 0 0 1 14 0M19 8v6M16 11h6"/>',
+    lupa: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
+    igual: '<path d="M5 9h14M5 15h14"/>',
+    distinto: '<path d="M5 9h14M5 15h14M16 5 8 19"/>',
+    escudo: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/>',
+  };
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = trazos[nombre] || "";
+  return svg;
+}
+
+function iniciales(nombre) {
+  return nombre.split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0].toUpperCase()).join("");
+}
+
+/* ------------------------------------------------------------------ */
+/* Estado                                                              */
+/* ------------------------------------------------------------------ */
+const estado = {
+  modo: "verificar",
+  personas: [],          // [{id, muestras, foto}]
+  sistema: null,         // /api/estado
+  archivo: null,         // File pendiente o analizado
+  bitmap: null,          // ImageBitmap de la foto
+  ocupado: false,
+  ultimaRespuesta: null,
+  inscritoReciente: null,
+};
+
+const MODOS = {
+  verificar: {
+    antetitulo: "Verificación 1:1",
+    titulo: "¿Es quien dice ser?",
+    descripcion: "Elige una persona de la base de datos y suelta una foto. El sistema la compara solo con esa persona y responde sí o no.",
+    zona: "Suelta tu foto para verificar",
+    boton: "Verificar",
+    pideNombre: true,
+    icono: "si",
+    comparacion: ["Comparación 1:1", "Con la persona indicada"],
+  },
+  identificar: {
+    antetitulo: "Identificación 1:N",
+    titulo: "¿Quién es?",
+    descripcion: "Suelta una foto y el sistema la compara con todas las personas de la base de datos para decirte quién es… o que no la conoce.",
+    zona: "Suelta tu foto para identificar",
+    boton: "Identificar",
+    pideNombre: false,
+    icono: "lupa",
+    comparacion: ["Comparación 1:N", "Con toda la base de datos"],
+  },
+  inscribir: {
+    antetitulo: "Inscripción",
+    titulo: "Añadir a la base de datos",
+    descripcion: "Escribe el nombre y suelta una foto. Se guarda su template (no la foto). Si la persona ya existe, se añade como otra muestra.",
+    zona: "Suelta la foto para inscribir",
+    boton: "Inscribir",
+    pideNombre: true,
+    icono: "persona",
+    comparacion: ["Guardado en la BD", "Template firmado con HMAC"],
+  },
+};
+
+const PASOS = ["carga", "deteccion", "alineado", "extraccion", "comparacion"];
+
+// Paso en el que se produce cada error y texto amable para el usuario
+const ERRORES = {
+  imagen_invalida: ["carga", "No puedo abrir esa imagen", "Usa una foto JPG o PNG. Las fotos HEIC del iPhone no están soportadas: expórtala como JPG."],
+  imagen_demasiado_grande: ["carga", "La imagen es demasiado grande", "Prueba con una foto de menos de 10 MB o reduce su resolución."],
+  sin_cara: ["deteccion", "No encuentro ninguna cara", "Prueba con una foto de frente, bien iluminada y en la que la cara se vea entera."],
+  varias_caras: ["deteccion", "Hay varias caras en la foto", "Usa una foto en la que salga una sola persona."],
+  cara_pequena: ["alineado", "La cara sale demasiado pequeña", "Usa una foto más cercana o recórtala alrededor de la cara."],
+  imagen_borrosa: ["alineado", "La cara está borrosa", "La foto está movida, desenfocada o muy comprimida. Prueba con otra más nítida."],
+  template_invalido: ["extraccion", "No se pudo calcular el template", null],
+  id_invalido: ["comparacion", "Nombre no válido", null],
+  id_no_inscrito: ["comparacion", "Esa persona no está en la base de datos", "Revisa el nombre (usa las sugerencias) o inscríbela antes en la pestaña Inscribir."],
+  limite_muestras: ["comparacion", "Esa persona ya tiene el máximo de fotos", null],
+  integridad_bd: ["comparacion", "¡La base de datos ha sido manipulada!", "La firma HMAC no cuadra: alguien ha modificado bd.csv fuera del sistema. Por seguridad no se usa."],
+  bd_corrupta: ["comparacion", "La base de datos está dañada", null],
+  configuracion_invalida: ["carga", "Error de configuración del servidor", null],
+};
+
+/* ------------------------------------------------------------------ */
+/* API                                                                 */
+/* ------------------------------------------------------------------ */
+async function api(ruta, opciones = {}) {
+  const respuesta = await fetch(ruta, opciones);
+  let datos;
+  try { datos = await respuesta.json(); } catch { datos = null; }
+  if (!datos) throw new Error(`El servidor respondió ${respuesta.status}`);
+  return datos;
+}
+
+async function cargarEstado() {
+  const pastilla = $("#estado-sistema");
+  try {
+    const s = await api("/api/estado");
+    estado.sistema = s;
+    const nombreExtractor = { sface: "SFace", lbp: "LBP" }[s.extractor] || s.extractor;
+    pastilla.classList.toggle("ok", s.integridad === "ok");
+    pastilla.classList.toggle("mal", s.integridad !== "ok");
+    $("#estado-texto").textContent = s.integridad === "ok"
+      ? `${nombreExtractor} · ${s.personas} personas · BD íntegra`
+      : "¡Base de datos manipulada!";
+    $("#pestana-bd-detalle").textContent = `${s.personas} personas inscritas`;
+    $("#pie-extractor").textContent =
+      `Extractor ${nombreExtractor} (${s.dimension} valores) · umbral verificación ${pct(s.umbrales.verificacion)} · identificación ${pct(s.umbrales.identificacion)}`;
+  } catch {
+    pastilla.classList.add("mal");
+    $("#estado-texto").textContent = "Sin conexión con el servidor";
+  }
+}
+
+async function cargarPersonas() {
+  try {
+    const datos = await api("/api/personas");
+    if (datos.error) throw new Error(datos.error.mensaje);
+    estado.personas = datos.personas;
+  } catch {
+    estado.personas = [];
+  }
+  const lista = $("#lista-nombres");
+  lista.replaceChildren(...estado.personas.map((p) => el("option", { value: p.id })));
+  actualizarAyudaNombre();
+  pintarBD();
+}
+
+const buscarPersona = (nombre) => {
+  const n = nombre.trim().normalize("NFC").toLocaleLowerCase("es");
+  return estado.personas.find((p) => p.id.toLocaleLowerCase("es") === n);
+};
+
+/* ------------------------------------------------------------------ */
+/* Modos y pestañas                                                    */
+/* ------------------------------------------------------------------ */
+function cambiarModo(modo, { conservarFoto = false } = {}) {
+  estado.modo = modo;
+  $$(".pestana").forEach((b) => {
+    const activa = b.dataset.modo === modo;
+    b.classList.toggle("activa", activa);
+    b.setAttribute("aria-selected", activa);
+  });
+  const esBD = modo === "bd";
+  $("#vista-operacion").hidden = esBD;
+  $("#vista-bd").hidden = !esBD;
+  if (esBD) { pintarBD(); return; }
+
+  const m = MODOS[modo];
+  $("#modo-antetitulo").textContent = m.antetitulo;
+  $("#modo-titulo").textContent = m.titulo;
+  $("#modo-descripcion").textContent = m.descripcion;
+  $("#modo-icono").replaceChildren(icono(m.icono));
+  $("#zona-titulo").textContent = m.zona;
+  $("#campo-nombre").hidden = !m.pideNombre;
+  $("#nombre").placeholder = modo === "inscribir" ? "Nombre y apellidos (p. ej. Ana López)" : "Empieza a escribir… (p. ej. Jack Straw)";
+  $("#nombre").setAttribute("list", modo === "verificar" ? "lista-nombres" : "");
+  $("#paso-comparacion-titulo").textContent = m.comparacion[0];
+  $("#paso-comparacion-detalle").textContent = m.comparacion[1];
+  actualizarAyudaNombre();
+
+  if (conservarFoto && estado.archivo) {
+    reiniciarPipeline();
+    pintarResultadoVacio();
+    dibujarFotoQuieta();
+    mostrarBotones({ ejecutar: true, otra: true });
+  } else {
+    reiniciarTodo();
+  }
+}
+
+function actualizarAyudaNombre() {
+  const ayuda = $("#nombre-ayuda");
+  const avatar = $("#nombre-avatar");
+  const nombre = $("#nombre").value;
+  const persona = nombre.trim() ? buscarPersona(nombre) : null;
+  ayuda.className = "campo__ayuda";
+  avatar.hidden = true;
+  if (estado.modo === "verificar") {
+    if (!nombre.trim()) ayuda.textContent = `${estado.personas.length} personas disponibles. Escribe para ver sugerencias.`;
+    else if (persona) {
+      ayuda.textContent = `✓ ${persona.id} está en la base de datos (${persona.muestras} muestra${persona.muestras > 1 ? "s" : ""})`;
+      ayuda.classList.add("ok");
+      if (persona.foto) { avatar.src = persona.foto; avatar.hidden = false; }
+    } else { ayuda.textContent = "No hay nadie con ese nombre en la base de datos."; ayuda.classList.add("aviso"); }
+  } else if (estado.modo === "inscribir") {
+    if (persona) {
+      ayuda.textContent = `${persona.id} ya existe: la foto se añadirá como otra muestra (${persona.muestras} → ${persona.muestras + 1}).`;
+      ayuda.classList.add("aviso");
+      if (persona.foto) { avatar.src = persona.foto; avatar.hidden = false; }
+    } else ayuda.textContent = "Letras, números, espacios y . - _ ' (máx. 100 caracteres).";
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Zona de soltar                                                      */
+/* ------------------------------------------------------------------ */
+function prepararZona() {
+  const zona = $("#zona");
+  const selector = $("#selector");
+  const abrir = () => { if (!estado.ocupado && !estado.archivo) selector.click(); };
+
+  zona.addEventListener("click", abrir);
+  zona.addEventListener("keydown", (e) => {
+    if ((e.key === "Enter" || e.key === " ") && !estado.archivo) { e.preventDefault(); abrir(); }
+  });
+  selector.addEventListener("change", () => {
+    if (selector.files[0]) recibirArchivo(selector.files[0]);
+    selector.value = "";
+  });
+  ["dragenter", "dragover"].forEach((t) => zona.addEventListener(t, (e) => {
+    e.preventDefault();
+    if (!estado.ocupado) zona.classList.add("encima");
+  }));
+  ["dragleave", "drop"].forEach((t) => zona.addEventListener(t, () => zona.classList.remove("encima")));
+  zona.addEventListener("drop", (e) => {
+    e.preventDefault();
+    const archivo = [...(e.dataTransfer?.files || [])].find((f) => f.type.startsWith("image/")) || e.dataTransfer?.files?.[0];
+    if (archivo) recibirArchivo(archivo);
+  });
+  // Soltar fuera de la zona no debe abrir la imagen en el navegador
+  ["dragover", "drop"].forEach((t) => window.addEventListener(t, (e) => e.preventDefault()));
+  window.addEventListener("paste", (e) => {
+    if (estado.modo === "bd") return;
+    const archivo = [...(e.clipboardData?.files || [])].find((f) => f.type.startsWith("image/"));
+    if (archivo) { e.preventDefault(); recibirArchivo(archivo); }
+  });
+}
+
+async function recibirArchivo(archivo) {
+  if (estado.ocupado) return;
+  if (archivo.size > 10 * 1024 * 1024) {
+    avisar("La foto supera 10 MB. Prueba con una más pequeña.");
+    return;
+  }
+  estado.archivo = archivo;
+  try {
+    estado.bitmap = await createImageBitmap(archivo);
+  } catch {
+    estado.bitmap = null; // p. ej. HEIC: el navegador no la abre, pero dejamos que el servidor lo diga
+  }
+  mostrarEscenario();
+  reiniciarPipeline();
+  pintarResultadoVacio();
+
+  const m = MODOS[estado.modo];
+  if (m.pideNombre && !$("#nombre").value.trim()) {
+    dibujarFotoQuieta();
+    $("#escenario-estado").textContent = "Escribe el nombre para continuar";
+    mostrarBotones({ ejecutar: true, otra: true });
+    pedirNombre();
+    return;
+  }
+  ejecutar();
+}
+
+function pedirNombre() {
+  const campo = $("#campo-nombre");
+  campo.classList.remove("temblor");
+  void campo.offsetWidth;
+  campo.classList.add("temblor");
+  campo.addEventListener("animationend", () => campo.classList.remove("temblor"), { once: true });
+  $("#nombre").focus();
+}
+
+function mostrarEscenario() {
+  $("#zona").classList.add("con-foto");
+  $("#zona-vacia").hidden = true;
+  $("#escenario").hidden = false;
+  ajustarLienzo();
+}
+
+function mostrarBotones({ ejecutar = false, otra = false }) {
+  const boton = $("#boton-ejecutar");
+  boton.hidden = !ejecutar;
+  boton.textContent = `${MODOS[estado.modo]?.boton || "Analizar"} esta foto`;
+  $("#boton-otra").hidden = !otra;
+}
+
+function reiniciarTodo() {
+  estado.archivo = null;
+  estado.bitmap = null;
+  estado.ultimaRespuesta = null;
+  detenerAnimacion();
+  $("#zona").classList.remove("con-foto");
+  $("#zona-vacia").hidden = false;
+  $("#escenario").hidden = true;
+  $("#escenario-estado").textContent = "";
+  mostrarBotones({});
+  reiniciarPipeline();
+  pintarResultadoVacio();
+}
+
+/* ------------------------------------------------------------------ */
+/* Lienzo: foto, escaneo y detecciones                                 */
+/* ------------------------------------------------------------------ */
+const lienzo = { canvas: null, ctx: null, ancho: 0, alto: 0, marco: null, raf: 0 };
+
+function ajustarLienzo() {
+  const canvas = $("#lienzo");
+  const caja = $("#zona").getBoundingClientRect();
+  const ancho = Math.max(caja.width - 4, 200);
+  const proporcion = estado.bitmap ? estado.bitmap.height / estado.bitmap.width : 0.75;
+  const alto = Math.round(Math.min(Math.max(ancho * proporcion, 280), 440));
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(ancho * dpr);
+  canvas.height = Math.round(alto * dpr);
+  canvas.style.height = `${alto}px`;
+  lienzo.canvas = canvas;
+  lienzo.ctx = canvas.getContext("2d");
+  lienzo.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  lienzo.ancho = ancho;
+  lienzo.alto = alto;
+  // Rectángulo donde cabe la foto entera (como object-fit: contain)
+  if (estado.bitmap) {
+    const escala = Math.min(ancho / estado.bitmap.width, alto / estado.bitmap.height);
+    const w = estado.bitmap.width * escala, h = estado.bitmap.height * escala;
+    lienzo.marco = { x: (ancho - w) / 2, y: (alto - h) / 2, w, h };
+  } else {
+    lienzo.marco = { x: 0, y: 0, w: ancho, h: alto };
+  }
+}
+
+function detenerAnimacion() { cancelAnimationFrame(lienzo.raf); lienzo.raf = 0; }
+
+function pintarFoto(oscurecer = 0) {
+  const { ctx, ancho, alto, marco } = lienzo;
+  ctx.clearRect(0, 0, ancho, alto);
+  ctx.fillStyle = "#06122e";
+  ctx.fillRect(0, 0, ancho, alto);
+  if (estado.bitmap) ctx.drawImage(estado.bitmap, marco.x, marco.y, marco.w, marco.h);
+  else {
+    ctx.fillStyle = "#7dd3fc";
+    ctx.font = "600 15px 'Plus Jakarta Sans', sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Vista previa no disponible para este formato", ancho / 2, alto / 2);
+  }
+  if (oscurecer > 0) {
+    ctx.fillStyle = `rgba(6, 18, 46, ${oscurecer})`;
+    ctx.fillRect(0, 0, ancho, alto);
+  }
+}
+
+function dibujarFotoQuieta() {
+  detenerAnimacion();
+  ajustarLienzo();
+  pintarFoto(0.15);
+}
+
+/** Escaneo mientras el servidor procesa: línea de luz que barre la foto. */
+function animarEscaneo() {
+  detenerAnimacion();
+  const inicio = performance.now();
+  const periodo = 1500;
+  const cuadro = (ahora) => {
+    const { ctx, ancho, marco } = lienzo;
+    pintarFoto(0.38);
+    const t = ((ahora - inicio) % periodo) / periodo;
+    const fase = t < 0.5 ? t * 2 : 2 - t * 2; // va y vuelve
+    const y = marco.y + fase * marco.h;
+
+    // Rejilla de puntos que se ilumina cerca de la línea
+    ctx.save();
+    for (let gy = marco.y + 12; gy < marco.y + marco.h; gy += 22) {
+      const cerca = Math.max(0, 1 - Math.abs(gy - y) / 90);
+      if (cerca <= 0) continue;
+      ctx.fillStyle = `rgba(125, 211, 252, ${0.55 * cerca})`;
+      for (let gx = marco.x + 12; gx < marco.x + marco.w; gx += 22) ctx.fillRect(gx - 1, gy - 1, 2, 2);
+    }
+    // Estela y línea
+    const sube = t >= 0.5;
+    const estela = ctx.createLinearGradient(0, y + (sube ? 70 : -70), 0, y);
+    estela.addColorStop(0, "rgba(56, 189, 248, 0)");
+    estela.addColorStop(1, "rgba(56, 189, 248, .28)");
+    ctx.fillStyle = estela;
+    ctx.fillRect(marco.x, sube ? y : y - 70, marco.w, 70);
+    ctx.shadowColor = "#38bdf8";
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = "#7dd3fc";
+    ctx.fillRect(marco.x, y - 1, marco.w, 2);
+    ctx.restore();
+
+    esquinasMarco(ctx, marco, "rgba(125, 211, 252, .9)");
+    lienzo.raf = requestAnimationFrame(cuadro);
+  };
+  lienzo.raf = requestAnimationFrame(cuadro);
+}
+
+function esquinasMarco(ctx, r, color, largo = 26, grosor = 3, radio = 6) {
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = grosor;
+  ctx.lineCap = "round";
+  const l = Math.min(largo, r.w / 3, r.h / 3);
+  const { x, y, w, h } = r;
+  ctx.beginPath();
+  ctx.moveTo(x, y + l); ctx.lineTo(x, y + radio); ctx.quadraticCurveTo(x, y, x + radio, y); ctx.lineTo(x + l, y);
+  ctx.moveTo(x + w - l, y); ctx.lineTo(x + w - radio, y); ctx.quadraticCurveTo(x + w, y, x + w, y + radio); ctx.lineTo(x + w, y + l);
+  ctx.moveTo(x + w, y + h - l); ctx.lineTo(x + w, y + h - radio); ctx.quadraticCurveTo(x + w, y + h, x + w - radio, y + h); ctx.lineTo(x + w - l, y + h);
+  ctx.moveTo(x + l, y + h); ctx.lineTo(x + radio, y + h); ctx.quadraticCurveTo(x, y + h, x, y + h - radio); ctx.lineTo(x, y + h - l);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** Detecciones: foco en la cara elegida, esquinas, confianza y 5 puntos. */
+function animarDetecciones(respuesta) {
+  detenerAnimacion();
+  const detecciones = respuesta.detecciones || [];
+  const img = respuesta.imagen;
+  const duracion = reduceMovimiento ? 1 : 900;
+  const inicio = performance.now();
+
+  const aLienzo = (x, y) => {
+    const { marco } = lienzo;
+    const sx = marco.w / (img?.ancho || 1), sy = marco.h / (img?.alto || 1);
+    return [marco.x + x * sx, marco.y + y * sy];
+  };
+
+  const cuadro = (ahora) => {
+    const p = Math.min(1, (ahora - inicio) / duracion);
+    const suave = 1 - Math.pow(1 - p, 3);
+    const { ctx, ancho, alto } = lienzo;
+    pintarFoto(0);
+    const elegida = detecciones.find((d) => d.elegida);
+
+    // Foco: oscurece todo menos la cara elegida
+    if (elegida) {
+      const [x0, y0] = aLienzo(elegida.caja[0], elegida.caja[1]);
+      const [x1, y1] = aLienzo(elegida.caja[0] + elegida.caja[2], elegida.caja[1] + elegida.caja[3]);
+      ctx.save();
+      ctx.fillStyle = `rgba(6, 18, 46, ${0.5 * suave})`;
+      ctx.beginPath();
+      ctx.rect(0, 0, ancho, alto);
+      ctx.roundRect(x0 - 6, y0 - 6, x1 - x0 + 12, y1 - y0 + 12, 12);
+      ctx.fill("evenodd");
+      ctx.restore();
+    } else if (detecciones.length === 0 && respuesta.error) {
+      ctx.fillStyle = `rgba(127, 29, 29, ${0.35 * suave})`;
+      ctx.fillRect(0, 0, ancho, alto);
+    }
+
+    detecciones.forEach((d, i) => {
+      const [x0, y0] = aLienzo(d.caja[0], d.caja[1]);
+      const [x1, y1] = aLienzo(d.caja[0] + d.caja[2], d.caja[1] + d.caja[3]);
+      const r = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+      const retardo = Math.max(0, Math.min(1, suave * 1.4 - i * 0.15));
+      if (retardo <= 0) return;
+      // La caja "se cierra" sobre la cara
+      const crecer = 1 + (1 - retardo) * 0.35;
+      const rc = { x: r.x + r.w / 2 - (r.w * crecer) / 2, y: r.y + r.h / 2 - (r.h * crecer) / 2, w: r.w * crecer, h: r.h * crecer };
+      ctx.save();
+      ctx.globalAlpha = retardo;
+      if (d.elegida) {
+        ctx.shadowColor = "#38bdf8";
+        ctx.shadowBlur = 14;
+        esquinasMarco(ctx, rc, "#7dd3fc", Math.max(14, r.w * 0.22), 3.5, 8);
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = "rgba(125, 211, 252, .35)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(rc.x, rc.y, rc.w, rc.h);
+      } else {
+        ctx.setLineDash([5, 5]);
+        ctx.strokeStyle = "rgba(255, 255, 255, .65)";
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(rc.x, rc.y, rc.w, rc.h);
+        ctx.setLineDash([]);
+      }
+      etiqueta(ctx, rc.x, rc.y - 8, d.elegida ? `Cara · ${pct(d.confianza)}` : `Ignorada · ${pct(d.confianza)}`, d.elegida);
+      // 5 puntos clave, uno tras otro
+      if (d.elegida) {
+        d.landmarks.forEach(([lx, ly], k) => {
+          const aparicion = Math.max(0, Math.min(1, (p - 0.35 - k * 0.08) / 0.2));
+          if (aparicion <= 0) return;
+          const [px, py] = aLienzo(lx, ly);
+          ctx.beginPath();
+          ctx.arc(px, py, 3.6 * aparicion + 0.5, 0, Math.PI * 2);
+          ctx.fillStyle = "#38bdf8";
+          ctx.fill();
+          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = "#fff";
+          ctx.stroke();
+        });
+        if (p > 0.85) { // líneas tenues ojos-nariz-boca
+          const pts = d.landmarks.map(([lx, ly]) => aLienzo(lx, ly));
+          ctx.globalAlpha = retardo * (p - 0.85) / 0.15 * 0.6;
+          ctx.strokeStyle = "#7dd3fc";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          [[0, 1], [0, 2], [1, 2], [2, 3], [2, 4], [3, 4]].forEach(([a, b]) => { ctx.moveTo(...pts[a]); ctx.lineTo(...pts[b]); });
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    });
+
+    if (p < 1) lienzo.raf = requestAnimationFrame(cuadro);
+    else lienzo.raf = 0;
+  };
+  lienzo.raf = requestAnimationFrame(cuadro);
+}
+
+function etiqueta(ctx, x, y, texto, destacada) {
+  ctx.save();
+  ctx.font = "700 12px 'Plus Jakarta Sans', sans-serif";
+  const w = ctx.measureText(texto).width + 16;
+  const h = 22;
+  const yy = Math.max(4, y - h);
+  const xx = Math.min(Math.max(4, x), lienzo.ancho - w - 4);
+  ctx.fillStyle = destacada ? "#0ea5e9" : "rgba(15, 27, 61, .75)";
+  ctx.beginPath();
+  ctx.roundRect(xx, yy, w, h, 7);
+  ctx.fill();
+  ctx.fillStyle = "#fff";
+  ctx.textBaseline = "middle";
+  ctx.fillText(texto, xx + 8, yy + h / 2 + 0.5);
+  ctx.restore();
+}
+
+/* ------------------------------------------------------------------ */
+/* Pipeline (columna derecha)                                          */
+/* ------------------------------------------------------------------ */
+function reiniciarPipeline() {
+  $$(".paso").forEach((p) => {
+    p.className = "paso";
+    $(".paso__tiempo", p).textContent = "";
+    const mini = $(".paso__miniatura", p);
+    if (mini) mini.hidden = true;
+    const codigo = $(".paso__codigo", p);
+    if (codigo) codigo.hidden = true;
+  });
+  const det = {
+    carga: "Se valida tamaño y formato",
+    deteccion: "Red YuNet: cajas y 5 puntos clave",
+    alineado: "Ojos horizontales, 112×112, nitidez",
+    extraccion: "La cara convertida en números",
+  };
+  for (const [paso, texto] of Object.entries(det)) $(`.paso[data-paso="${paso}"] .paso__detalle`).textContent = texto;
+  const m = MODOS[estado.modo];
+  if (m) $("#paso-comparacion-detalle").textContent = m.comparacion[1];
+}
+
+function marcarPaso(paso, clase, detalle, tiempo) {
+  const nodo = $(`.paso[data-paso="${paso}"]`);
+  nodo.className = `paso ${clase}`;
+  if (detalle != null) $(".paso__detalle", nodo).textContent = detalle;
+  if (tiempo != null) $(".paso__tiempo", nodo).textContent = `${Math.max(1, Math.round(tiempo))} ms`;
+}
+
+function dibujarCodigo(canvas, valores, alto) {
+  canvas.hidden = false;
+  const dpr = window.devicePixelRatio || 1;
+  const ancho = canvas.clientWidth || canvas.parentElement.clientWidth || 240;
+  canvas.width = ancho * dpr;
+  canvas.height = alto * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, ancho, alto);
+  // Si hay más valores que píxeles (LBP: 2891), se agrupan por máximo absoluto
+  const n = Math.min(valores.length, Math.floor(ancho / 2));
+  const grupo = valores.length / n;
+  const barras = Array.from({ length: n }, (_, i) => {
+    const trozo = valores.slice(Math.floor(i * grupo), Math.floor((i + 1) * grupo));
+    return trozo.reduce((a, v) => (Math.abs(v) > Math.abs(a) ? v : a), 0);
+  });
+  const maximo = Math.max(...barras.map(Math.abs)) || 1;
+  const conSigno = barras.some((v) => v < 0);
+  const ab = ancho / n;
+  barras.forEach((v, i) => {
+    const h = Math.max(1, (Math.abs(v) / maximo) * (conSigno ? alto / 2 - 1 : alto - 1));
+    ctx.fillStyle = v >= 0 ? "#2563eb" : "#38bdf8";
+    const y = conSigno ? (v >= 0 ? alto / 2 - h : alto / 2) : alto - h;
+    ctx.fillRect(i * ab, y, Math.max(1, ab - 0.6), h);
+  });
+}
+
+async function animarPipeline(respuesta) {
+  const t = respuesta.tiempos_ms || {};
+  const err = respuesta.error;
+  const pasoError = err ? (ERRORES[err.error]?.[0] || "comparacion") : null;
+  const pausa = reduceMovimiento ? 0 : 280;
+  const det = respuesta.detecciones || [];
+  const elegida = det.find((d) => d.elegida);
+
+  const detalles = {
+    carga: respuesta.imagen ? `${respuesta.imagen.ancho}×${respuesta.imagen.alto} px` : null,
+    deteccion: det.length === 0 ? "Ninguna cara encontrada"
+      : `${det.length} cara${det.length > 1 ? "s" : ""}${elegida ? ` · confianza ${pct(elegida.confianza)}` : ""}${det.length > 1 && elegida ? " · se usa la mayor" : ""}`,
+    alineado: respuesta.nitidez != null ? `112×112 · nitidez ${Math.round(respuesta.nitidez)} ✓` : null,
+    extraccion: respuesta.template ? `${respuesta.template.dimension} números` : null,
+    comparacion: null,
+  };
+  const r = respuesta.resultado;
+  if (r) {
+    if (estado.modo === "verificar") detalles.comparacion = `Con ${r.id}: ${pct(r.puntuacion)}`;
+    if (estado.modo === "identificar") detalles.comparacion = `Con ${r.personas} persona${r.personas === 1 ? "" : "s"}`;
+    if (estado.modo === "inscribir") detalles.comparacion = `Guardado · ${r.muestras} muestra${r.muestras > 1 ? "s" : ""}`;
+  }
+
+  let deteccionPintada = false;
+  for (const paso of PASOS) {
+    if (paso === pasoError) {
+      marcarPaso(paso, "error", ERRORES[err.error]?.[1] || err.mensaje, t[paso]);
+      break;
+    }
+    marcarPaso(paso, "activo", null, null);
+    if (paso === "deteccion") { animarDetecciones(respuesta); deteccionPintada = true; }
+    await esperar(pausa);
+    marcarPaso(paso, "hecho", detalles[paso], t[paso]);
+    if (paso === "alineado" && respuesta.cara_alineada) {
+      const mini = $(`.paso[data-paso="alineado"] .paso__miniatura`);
+      mini.src = respuesta.cara_alineada;
+      mini.hidden = false;
+    }
+    if (paso === "extraccion" && respuesta.template) {
+      dibujarCodigo($(`.paso[data-paso="extraccion"] .paso__codigo`), respuesta.template.valores, 26);
+    }
+  }
+  // Si falló antes de llegar a pintar la detección (o en ella), se para el escaneo y se
+  // enseña lo que haya: cajas de varias caras, o la foto en rojo si no hay ninguna.
+  if (!deteccionPintada) animarDetecciones(respuesta);
+}
+
+/* ------------------------------------------------------------------ */
+/* Ejecutar una operación                                              */
+/* ------------------------------------------------------------------ */
+async function ejecutar() {
+  if (estado.ocupado || !estado.archivo) return;
+  const m = MODOS[estado.modo];
+  const nombre = $("#nombre").value.trim();
+  if (m.pideNombre && !nombre) { pedirNombre(); return; }
+
+  estado.ocupado = true;
+  mostrarBotones({});
+  reiniciarPipeline();
+  pintarResultadoVacio("Analizando…");
+  ajustarLienzo();
+  animarEscaneo();
+  marcarPaso("carga", "activo");
+  const estadoEscenario = $("#escenario-estado");
+  estadoEscenario.replaceChildren(el("span", { class: "girando" }), "Buscando caras…");
+
+  const url = `/api/${estado.modo}` + (m.pideNombre ? `?id=${encodeURIComponent(nombre)}` : "");
+  let respuesta;
+  try {
+    [respuesta] = await Promise.all([
+      api(url, {
+        method: "POST",
+        headers: { "Content-Type": estado.archivo.type || "application/octet-stream", "X-JumeX-Lens": "1" },
+        body: estado.archivo,
+      }),
+      esperar(reduceMovimiento ? 0 : 1400), // que dé tiempo a ver el escaneo
+    ]);
+  } catch (e) {
+    respuesta = { ok: false, detecciones: [], error: { error: "red", mensaje: `No se pudo contactar con el servidor (${e.message}).` } };
+  }
+  estado.ultimaRespuesta = respuesta;
+  estadoEscenario.textContent = "";
+
+  await animarPipeline(respuesta);
+  pintarResultado(respuesta, nombre);
+  if (matchMedia("(max-width: 960px)").matches) {
+    $("#resultado").scrollIntoView({ behavior: reduceMovimiento ? "auto" : "smooth", block: "start" });
+  }
+  estado.ocupado = false;
+  mostrarBotones({ otra: true });
+
+  if (estado.modo === "inscribir" && respuesta.ok) {
+    estado.inscritoReciente = respuesta.resultado.id;
+    await Promise.all([cargarEstado(), cargarPersonas()]);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Tarjetas de resultado                                               */
+/* ------------------------------------------------------------------ */
+function pintarResultadoVacio(texto = null) {
+  let simbolo;
+  if (texto) simbolo = el("span", { class: "girando--azul" });
+  else {
+    simbolo = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    simbolo.setAttribute("viewBox", "0 0 24 24");
+    simbolo.innerHTML = '<circle cx="12" cy="12" r="9"/><path d="M12 8v4l2.5 2.5"/>';
+  }
+  $("#resultado").replaceChildren(el("div", { class: "resultado__vacio" }, simbolo,
+    el("p", { text: texto || "El resultado aparecerá aquí" })));
+}
+
+function veredicto(tipo, antetitulo, titulo, subtitulo) {
+  return el("div", { class: `veredicto veredicto--${tipo}` },
+    el("div", { class: "veredicto__icono" }, icono({ si: "si", no: "no", duda: "duda", info: "persona", aviso: "aviso" }[tipo] || "si")),
+    el("div", {},
+      el("p", { class: "veredicto__antetitulo", text: antetitulo }),
+      el("h3", { text: titulo }),
+      subtitulo ? el("p", { text: subtitulo }) : null));
+}
+
+function figuraCara(src, titulo, nombre) {
+  const marco = el("div", { class: "cara__marco" });
+  if (src) marco.append(el("img", { src, alt: nombre || titulo }));
+  else marco.append(el("div", { class: "iniciales", text: nombre ? iniciales(nombre) : "?" }));
+  return el("figure", { class: "cara" }, marco, el("figcaption", {}, nombre ? el("b", { text: nombre }) : null, titulo));
+}
+
+function medidor(puntuacion, umbral, tipo) {
+  const relleno = el("div", { class: "medidor__relleno" });
+  const umbralNodo = el("div", { class: "medidor__umbral" }, el("span", { text: `umbral ${pct(umbral)}` }));
+  umbralNodo.style.left = `${umbral * 100}%`;
+  requestAnimationFrame(() => requestAnimationFrame(() => { relleno.style.width = `${puntuacion * 100}%`; }));
+  return el("div", { class: `medidor medidor--${tipo}` },
+    el("div", { class: "medidor__cabecera" }, el("span", { text: "Similitud" }), el("b", { text: pct(puntuacion) })),
+    el("div", { class: "medidor__pista" }, relleno, umbralNodo),
+    el("div", { class: "medidor__escala" }, el("span", { text: "0% · nada parecidas" }), el("span", { text: "100% · idénticas" })));
+}
+
+function listaCandidatos(candidatos, umbral, titulo = "Los más parecidos") {
+  if (!candidatos?.length) return null;
+  return el("div", { class: "candidatos" },
+    el("h4", { text: titulo }),
+    candidatos.map((c) => {
+      const barra = el("i");
+      barra.style.width = `${c.puntuacion * 100}%`;
+      return el("div", { class: `candidato${c.puntuacion >= umbral ? " supera" : ""}` },
+        c.foto ? el("img", { src: c.foto, alt: "" }) : el("span", { class: "iniciales", text: iniciales(c.id) }),
+        el("span", { class: "candidato__nombre", text: c.id }),
+        el("span", { class: "candidato__barra" }, barra),
+        el("span", { class: "candidato__valor", text: pct(c.puntuacion) }));
+    }));
+}
+
+function explicacion(...partes) {
+  return el("p", { class: "explicacion" }, ...partes);
+}
+
+function pintarResultado(respuesta, nombre) {
+  const caja = $("#resultado");
+  const contenido = el("div", { class: "aparece" });
+
+  if (!respuesta.ok) {
+    const e = respuesta.error || { error: "desconocido", mensaje: "Error desconocido" };
+    const [, titulo, ayuda] = ERRORES[e.error] || [null, "Algo ha fallado", null];
+    contenido.append(
+      veredicto(e.error === "integridad_bd" ? "no" : "aviso", e.error === "red" ? "Sin conexión" : "No se ha podido completar", titulo, ayuda || e.mensaje),
+      ayuda && e.mensaje ? explicacion(el("b", { text: "Detalle técnico: " }), `${e.mensaje} (código ${e.error})`) : null,
+    );
+    if (respuesta.retrato) contenido.append(el("div", { class: "caras" }, figuraCara(respuesta.retrato, "La que has subido", "Tu foto"), el("div"), el("div")));
+    caja.replaceChildren(contenido);
+    return;
+  }
+
+  const r = respuesta.resultado;
+  if (estado.modo === "verificar") {
+    const si = r.aceptado;
+    contenido.append(
+      veredicto(si ? "si" : "no", si ? "Identidad confirmada" : "Identidad rechazada",
+        si ? `Sí, es ${r.id}` : `No, no es ${r.id}`,
+        si ? "La cara de la foto coincide con la guardada." : "La cara de la foto no coincide con la guardada."),
+      el("div", { class: "caras" },
+        figuraCara(respuesta.retrato, "La que has subido", "Tu foto"),
+        el("div", { class: `conector conector--${si ? "si" : "no"}` }, el("span", {}, icono(si ? "igual" : "distinto")), pct(r.puntuacion)),
+        figuraCara(r.foto, "En la base de datos", r.id)),
+      medidor(r.puntuacion, r.umbral, si ? "si" : "no"),
+      explicacion(
+        el("b", { text: "¿Por qué? " }),
+        si ? `La similitud (${pct(r.puntuacion)}) supera el umbral (${pct(r.umbral)}), así que el sistema acepta que es ${r.id}.`
+           : `La similitud (${pct(r.puntuacion)}) no llega al umbral (${pct(r.umbral)}), así que el sistema rechaza que sea ${r.id}.`),
+    );
+  } else if (estado.modo === "identificar") {
+    if (r.personas === 0) {
+      contenido.append(veredicto("duda", "Base de datos vacía", "No hay nadie con quien comparar", "Inscribe a alguien primero en la pestaña Inscribir."));
+    } else if (r.identificado) {
+      contenido.append(
+        veredicto("si", "Persona identificada", `Esta persona es ${r.id}`, `La más parecida de ${r.personas} personas, y supera el umbral.`),
+        el("div", { class: "caras" },
+          figuraCara(respuesta.retrato, "La que has subido", "Tu foto"),
+          el("div", { class: "conector conector--si" }, el("span", {}, icono("igual")), pct(r.puntuacion)),
+          figuraCara(r.foto, "En la base de datos", r.id)),
+        medidor(r.puntuacion, r.umbral, "si"),
+        listaCandidatos(r.candidatos, r.umbral),
+      );
+    } else {
+      const mejor = r.candidatos?.[0];
+      contenido.append(
+        veredicto("duda", "Persona desconocida", "No está en la base de datos",
+          mejor ? `Nadie supera el umbral. La más parecida es ${mejor.id}, pero solo al ${pct(mejor.puntuacion)}.` : "Nadie supera el umbral."),
+        mejor ? el("div", { class: "caras" },
+          figuraCara(respuesta.retrato, "La que has subido", "Tu foto"),
+          el("div", { class: "conector conector--no" }, el("span", {}, icono("distinto")), pct(mejor.puntuacion)),
+          figuraCara(mejor.foto, "La más parecida", mejor.id)) : null,
+        mejor ? medidor(mejor.puntuacion, r.umbral, "no") : null,
+        listaCandidatos(r.candidatos, r.umbral),
+        explicacion(el("b", { text: "¿Por qué? " }), `Para identificar a alguien su similitud tiene que superar el umbral (${pct(r.umbral)}). Si no, es más seguro decir "no lo conozco" que arriesgarse a confundirlo con otra persona.`),
+      );
+    }
+  } else if (estado.modo === "inscribir") {
+    const nueva = r.nueva_persona;
+    const codigo = el("canvas");
+    contenido.append(
+      veredicto("si", nueva ? "Persona inscrita" : "Muestra añadida",
+        nueva ? `${r.id}, bienvenido/a` : `Nueva foto para ${r.id}`,
+        nueva ? "Ya está en la base de datos: prueba a verificarla o identificarla con otra foto."
+              : `Ahora tiene ${r.muestras} muestras. Se compara con la más parecida.`),
+      el("div", { class: "guardado" },
+        figuraCara(r.foto || respuesta.retrato, nueva ? "Retrato para la galería" : "Retrato de la galería"),
+        el("div", { class: "guardado__datos" },
+          el("h4", { text: "Lo que se guarda en bd.csv" }),
+          codigo,
+          el("p", { text: `${respuesta.template.dimension} números (el template) + una firma HMAC que detecta cualquier cambio. La foto no se usa para comparar.` }))),
+      el("div", { class: "acciones" },
+        el("button", { class: "boton boton--secundario", text: "Verificarla ahora", onclick: () => { $("#nombre").value = r.id; cambiarModo("verificar"); } }),
+        el("button", { class: "boton boton--enlace", text: "Ver en la base de datos →", onclick: () => cambiarModo("bd") })),
+    );
+    caja.replaceChildren(contenido);
+    requestAnimationFrame(() => dibujarCodigo(codigo, respuesta.template.valores, 54));
+    return;
+  }
+  caja.replaceChildren(contenido);
+}
+
+/* ------------------------------------------------------------------ */
+/* Base de datos                                                       */
+/* ------------------------------------------------------------------ */
+function pintarBD() {
+  const s = estado.sistema;
+  const insignias = $("#bd-insignias");
+  insignias.replaceChildren();
+  if (s) {
+    const muestras = estado.personas.reduce((a, p) => a + p.muestras, 0);
+    insignias.append(
+      el("span", { class: `insignia ${s.integridad === "ok" ? "insignia--ok" : "insignia--mal"}` },
+        icono("escudo"), s.integridad === "ok" ? "Integridad HMAC verificada" : "Integridad rota"),
+      el("span", { class: "insignia", text: `${estado.personas.length} personas · ${muestras} muestras` }),
+      el("span", { class: "insignia", text: `Template: ${s.dimension} números` }));
+  }
+
+  const filtro = $("#buscador").value.trim().toLocaleLowerCase("es");
+  const visibles = estado.personas.filter((p) => p.id.toLocaleLowerCase("es").includes(filtro));
+  const rejilla = $("#rejilla-bd");
+  rejilla.replaceChildren(...visibles.map((p, i) => {
+    const marco = el("div", { class: "cara__marco" });
+    marco.append(p.foto ? el("img", { src: p.foto, alt: "", loading: "lazy" }) : el("div", { class: "iniciales", text: iniciales(p.id) }));
+    const tarjeta = el("button", {
+      class: `persona${p.id === estado.inscritoReciente ? " nueva" : ""}`,
+      title: `Verificar a ${p.id}`,
+      onclick: () => {
+        $("#nombre").value = p.id;
+        cambiarModo("verificar");
+        window.scrollTo({ top: $("#vista-operacion").offsetTop - 16, behavior: reduceMovimiento ? "auto" : "smooth" });
+        avisar(`Suelta una foto para comprobar si es ${p.id}`);
+      },
+    },
+      marco,
+      el("span", { class: "persona__nombre", text: p.id }),
+      el("span", { class: "persona__meta" },
+        el("span", { text: `${p.muestras} muestra${p.muestras > 1 ? "s" : ""}` }),
+        el("span", { class: "persona__accion", text: "Verificar →" })));
+    tarjeta.style.setProperty("--i", Math.min(i, 40));
+    return tarjeta;
+  }));
+
+  const vacia = $("#bd-vacia");
+  vacia.hidden = visibles.length > 0;
+  vacia.textContent = estado.personas.length === 0
+    ? "La base de datos está vacía. Inscribe a alguien en la pestaña Inscribir."
+    : `Nadie coincide con "${$("#buscador").value}".`;
+}
+
+/* ------------------------------------------------------------------ */
+/* Avisos                                                              */
+/* ------------------------------------------------------------------ */
+let temporizadorAviso = 0;
+function avisar(texto) {
+  const aviso = $("#aviso");
+  aviso.textContent = texto;
+  aviso.hidden = false;
+  clearTimeout(temporizadorAviso);
+  temporizadorAviso = setTimeout(() => { aviso.hidden = true; }, 3200);
+}
+
+/* ------------------------------------------------------------------ */
+/* Arranque                                                            */
+/* ------------------------------------------------------------------ */
+function iniciar() {
+  $$(".pestana").forEach((b) => b.addEventListener("click", () => {
+    if (estado.ocupado) { avisar("Espera a que termine el análisis"); return; }
+    cambiarModo(b.dataset.modo, { conservarFoto: b.dataset.modo !== "bd" });
+  }));
+  prepararZona();
+  $("#nombre").addEventListener("input", () => {
+    actualizarAyudaNombre();
+    if (estado.archivo && !estado.ocupado) {
+      mostrarBotones({ ejecutar: true, otra: true });
+      $("#escenario-estado").textContent = "";
+    }
+  });
+  $("#nombre").addEventListener("keydown", (e) => { if (e.key === "Enter") ejecutar(); });
+  $("#boton-ejecutar").addEventListener("click", (e) => { e.stopPropagation(); ejecutar(); });
+  $("#boton-otra").addEventListener("click", (e) => { e.stopPropagation(); reiniciarTodo(); $("#selector").click(); });
+  $("#buscador").addEventListener("input", pintarBD);
+
+  let temporizadorResize = 0;
+  window.addEventListener("resize", () => {
+    clearTimeout(temporizadorResize);
+    temporizadorResize = setTimeout(() => {
+      if (!estado.bitmap || $("#escenario").hidden) return;
+      ajustarLienzo();
+      if (estado.ultimaRespuesta && !estado.ocupado) { lienzo.raf = 0; animarDetecciones(estado.ultimaRespuesta); }
+      else if (!estado.ocupado) pintarFoto(0.15);
+    }, 120);
+  });
+
+  cambiarModo("verificar");
+  cargarEstado();
+  cargarPersonas();
+}
+
+document.addEventListener("DOMContentLoaded", iniciar);

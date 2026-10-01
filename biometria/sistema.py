@@ -114,16 +114,24 @@ class SistemaBiometrico:
         umbral = self.cfg.umbrales.verificacion
         return ResultadoVerificacion(id_persona, puntuacion >= umbral, puntuacion, umbral)
 
-    def _identificar(self, template) -> ResultadoIdentificacion:
+    def ranking(self, template, n: int | None = None) -> list[tuple[str, float]]:
+        """Personas de la BD ordenadas de más a menos parecida: [(id, puntuación), ...].
+
+        Con empate, primero el id alfabéticamente menor (resultado determinista).
+        """
         template = self.extractor.validar_template(template)
+        puntuaciones = [(id_persona, self._puntuar(template, muestras))
+                        for id_persona, muestras in self.bd.por_id().items()]
+        puntuaciones.sort(key=lambda par: (-par[1], par[0]))
+        return puntuaciones[:n] if n is not None else puntuaciones
+
+    def _identificar(self, template) -> ResultadoIdentificacion:
         umbral = self.cfg.umbrales.identificacion
-        mejor_id, mejor = None, None
-        # sorted: con empate gana siempre el mismo (el primero alfabéticamente)
-        for id_persona, muestras in sorted(self.bd.por_id().items()):
-            puntuacion = self._puntuar(template, muestras)
-            if mejor is None or puntuacion > mejor:
-                mejor_id, mejor = id_persona, puntuacion
-        if mejor is None or mejor < umbral:
+        mejores = self.ranking(template, 1)
+        if not mejores:
+            return ResultadoIdentificacion(None, None, umbral)
+        mejor_id, mejor = mejores[0]
+        if mejor < umbral:
             return ResultadoIdentificacion(None, mejor, umbral)
         return ResultadoIdentificacion(mejor_id, mejor, umbral)
 

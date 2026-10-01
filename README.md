@@ -123,6 +123,30 @@ sistema.verificar_t("Ana López", t)
 > prácticamente a cualquiera (ver [Extractor](#extractor)). El umbral se
 > calibrará en la fase 6.
 
+## Demo web: JumeX Lens
+
+Interfaz web para ver el sistema funcionando: soltar una foto para **verificar**,
+**identificar** o **inscribir**, con la animación de detección, cada paso del
+pipeline (detección → alineado → template → comparación) y una galería de la
+**base de datos**.
+
+```bash
+python scripts/descargar_modelos.py                                     # YuNet + SFace
+python scripts/inscribir_csv.py data/lfw/personas.csv --config config_lens.yaml   # 50 personas de LFW
+python -m biometria.web                                                 # abre http://127.0.0.1:8000
+```
+
+- Usa [`config_lens.yaml`](config_lens.yaml): extractor **SFace** (red de OpenCV
+  Zoo, referencia fuerte), BD propia en `data/lens/` y umbrales 0,68
+  (verificación) y 0,70 (identificación). En 144 personas de LFW: EER 1,4 % y
+  rank-1 98,6 %, frente al 37 % y 11 % del LBP. Con `--config config.yaml` se usa el LBP.
+- Fotos de prueba en `data/lfw/pruebas/`: `inscritos/` (otras fotos de personas
+  de la BD) y `desconocidos/` (famosos que no están).
+- Guarda además un retrato por persona en `data/lens/caras/` **solo para la
+  interfaz**; el sistema compara siempre templates.
+- Solo escucha en `127.0.0.1`, exige la cabecera `X-JumeX-Lens` en los POST y
+  rechaza un `Host` distinto de localhost (CSRF y DNS rebinding).
+
 ## Detector y cámara
 
 Demo en directo con la webcam (solo en local; Docker en macOS no ve la cámara):
@@ -281,9 +305,11 @@ acentos y ñ), números, espacios y `. - _ '` (máximo 100 caracteres).
 │   ├── bd.py               base de datos CSV con HMAC y cifrado opcional
 │   ├── sistema.py          SistemaBiometrico: los 9 métodos
 │   ├── cli.py              línea de comandos (salida JSON)
+│   ├── web/                demo web JumeX Lens (servidor + interfaz)
 │   ├── extractores/        extractores intercambiables
 │   │   ├── base.py         interfaz común: extraer, comparar, validar_template
-│   │   └── lbp.py          LBP uniforme por rejilla (provisional)
+│   │   ├── lbp.py          LBP uniforme por rejilla (provisional)
+│   │   └── sface.py        SFace de OpenCV Zoo (referencia, demo web)
 │   └── __main__.py         punto de entrada: python -m biometria
 ├── scripts/
 │   ├── descargar_modelos.py

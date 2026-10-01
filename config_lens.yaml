@@ -1,0 +1,44 @@
+# Configuración de la demo web JumeX Lens (python -m biometria.web).
+#
+# Igual que config.yaml salvo:
+#   - extractor SFace (referencia fuerte) en vez del LBP provisional;
+#   - BD propia en data/lens/ (no mezcla templates SFace con los LBP de data/bd.csv);
+#   - varias_caras: mayor y nitidez mínima 40, más permisivos para fotos de internet;
+#   - verificación 0.68: el umbral recomendado por OpenCV para SFace (coseno
+#     0.363). En 144 personas de LFW da FAR 0,05 % y FRR 2 % (EER 1,4 % con 0.644).
+#   - identificación 0.70, algo más estricto: en 1:N se compara con todas las
+#     personas, así que la probabilidad de una coincidencia falsa crece con el
+#     tamaño de la BD (en LFW: FAR 0,01 %, FRR 3,5 %).
+
+detector:
+  modelo: models/face_detection_yunet_2023mar.onnx
+  umbral_confianza: 0.8
+  umbral_nms: 0.3
+  varias_caras: mayor
+
+preprocesado:
+  tam_cara: [112, 112]      # SFace necesita exactamente 112x112
+
+calidad:
+  tam_min_cara: 60
+  umbral_borrosidad: 40.0
+
+extractor:
+  nombre: sface
+  parametros:
+    modelo: models/face_recognition_sface_2021dec.onnx
+
+bd:
+  ruta: data/lens/bd.csv
+  ruta_clave: data/lens/clave_hmac.key
+  cifrar_templates: false
+  agregacion: max
+
+umbrales:
+  verificacion: 0.68
+  identificacion: 0.70
+
+limites:
+  max_bytes_imagen: 10485760
+  max_pixeles: 25000000
+  max_muestras_por_id: 10
