@@ -18,7 +18,7 @@ de Docker), para que el grupo rival pueda ejecutarlo y atacarlo.
 | Fase | Rama | Contenido | Estado |
 |---|---|---|---|
 | 1 | `setup-base` | Estructura, dependencias, Docker, configuración | ✅ |
-| 2 | `detector` | YuNet, alineado por ojos y control de calidad | ⏳ |
+| 2 | `detector` | YuNet, alineado por ojos, control de calidad y demo de cámara | ✅ |
 | 3 | `extractor` | Interfaz de extractor y LBP provisional | ⏳ |
 | 4 | `bd-csv` | Base de datos CSV con validación e integridad (HMAC) | ⏳ |
 | 5 | `sistema-cli` | `SistemaBiometrico` con los 9 métodos y la CLI | ⏳ |
@@ -62,16 +62,61 @@ python -m biometria                  # comprueba el entorno
 pytest -q
 ```
 
+## Detector y cámara
+
+Demo en directo con la webcam (solo en local; Docker en macOS no ve la cámara):
+
+```bash
+python -m biometria.camara                # umbral de confianza de config.yaml
+python -m biometria.camara --umbral 0.5   # muestra también caras con menos confianza
+```
+
+Cada cara aparece con su **confianza en [0, 1]** (rojo = baja, verde = alta), sus
+5 landmarks y, para la cara principal, el resultado del control de calidad
+(`OK`, `cara_pequena`, `imagen_borrosa`, `varias_caras`). La ventana
+"cara alineada" muestra exactamente lo que recibe el extractor. Con `s` se
+guardan la foto y la cara en `data/capturas/` (útil para inscribir a nuestra
+persona número 51); con `q` se sale. La primera vez macOS pedirá permiso de
+cámara para Terminal o VS Code.
+
+Para revisar a ojo el detector sobre una carpeta de fotos:
+
+```bash
+python scripts/probar_detector.py data/fotos --anotadas --recursivo
+# -> caras_recortadas/caras/*.png, caras_recortadas/anotadas/*.jpg y resumen.csv
+```
+
+`resumen.csv` incluye la confianza, el tamaño de la cara y la nitidez de cada
+foto, para calibrar `calidad.tam_min_cara` y `calidad.umbral_borrosidad`.
+
+Desde Python:
+
+```python
+from biometria.config import cargar_config
+from biometria.detector import Detector
+from biometria.imagen import cargar_imagen
+
+cfg = cargar_config()
+detector = Detector(cfg)
+imagen = cargar_imagen("foto.jpg", cfg.limites)
+detector.detectar(imagen)              # [Deteccion(caja, landmarks, confianza), ...]
+detector.procesar(imagen).cara         # cara alineada 112x112 (o error claro)
+```
+
 ## Estructura del repositorio
 
 ```
 ├── biometria/              paquete principal
 │   ├── config.py           carga y validación de config.yaml
 │   ├── errores.py          excepciones con código estable (se devuelven en la CLI)
+│   ├── imagen.py           carga segura de imágenes (límites de bytes y píxeles)
+│   ├── detector.py         YuNet + alineado + control de calidad
+│   ├── camara.py           demo en directo con la webcam
 │   ├── extractores/        extractores intercambiables (LBP provisional, ...)
 │   └── __main__.py         punto de entrada: python -m biometria
 ├── scripts/
-│   └── descargar_modelos.py
+│   ├── descargar_modelos.py
+│   └── probar_detector.py  procesa una carpeta y guarda las caras para revisarlas
 ├── tests/                  tests con pytest
 ├── data/                   (fuera de git) fotos, bd.csv y clave HMAC
 ├── models/                 (fuera de git) modelos descargados
@@ -117,7 +162,22 @@ Decisiones tomadas donde el enunciado es ambiguo o deja libertad:
 7. **Umbrales provisionales (0.5).** Se calibrarán con el script de evaluación
    cuando tengamos las fotos del profesor.
 8. **Versiones fijadas para Python 3.11:** numpy 2.4.x (la 2.5 ya exige 3.12) y
-   OpenCV 4.14 headless (sin dependencias gráficas).
+   OpenCV 4.14 **completo** (no headless), porque la demo de cámara necesita
+   `cv2.imshow`.
+9. **Alineado con los 5 landmarks**, no solo con los ojos: es una transformación
+   de similitud (rotación + escala + traslación) estimada con LMEDS, más estable
+   si un punto sale mal. Los ojos quedan horizontales y siempre a la misma altura.
+10. **Los métodos `_sd` sí pasan el control de nitidez.** Omiten el detector, pero
+    no el control de calidad. Así una imagen plana o vacía no llega al extractor.
+11. **Control de calidad tras detectar:** el tamaño mínimo se mide sobre la caja
+    en la imagen original y la nitidez (varianza del Laplaciano) sobre la cara
+    ya alineada, para que no dependa de la resolución de la foto.
+12. **Doble límite de píxeles:** OpenCV rechaza al leer la cabecera las imágenes
+    de más de 50 Mpx, sin llegar a decodificarlas (`OPENCV_IO_MAX_IMAGE_PIXELS`,
+    fijado en `biometria/__init__.py`). Además se aplica `limites.max_pixeles`
+    de la configuración. Por eso hay que **importar `biometria` antes que `cv2`**.
+13. **Imágenes grandes:** se detecta sobre una copia reducida a 1280 px de lado,
+    pero la cara se recorta de la imagen original a resolución completa.
 
 ## Problemas frecuentes
 
