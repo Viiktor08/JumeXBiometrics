@@ -89,6 +89,19 @@ python scripts/probar_detector.py data/fotos --anotadas --recursivo
 `resumen.csv` incluye la confianza, el tamaño de la cara y la nitidez de cada
 foto, para calibrar `calidad.tam_min_cara` y `calidad.umbral_borrosidad`.
 
+Mientras no tengamos las 50 fotos del profesor, se puede probar con 50 personas
+de [LFW](https://vis-www.cs.umass.edu/lfw/) (Labeled Faces in the Wild):
+
+```bash
+python scripts/preparar_lfw.py      # data/lfw/fotos/*.jpg y data/lfw/personas.csv (id,foto)
+python scripts/probar_detector.py data/lfw/fotos --anotadas --salida caras_lfw
+```
+
+Resultado con la semilla por defecto: cara detectada en las 50 fotos, sin falsos
+positivos. Con `varias_caras: error` se rechazan 8 por tener gente al fondo; con
+`mayor` pasan y siempre se elige a la persona correcta. 1 o 2 se quedan justo por
+debajo del umbral de nitidez (43–45 frente a 50) por la compresión JPEG de LFW.
+
 Desde Python:
 
 ```python

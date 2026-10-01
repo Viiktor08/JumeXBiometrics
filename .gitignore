@@ -33,6 +33,7 @@ models/*
 # --- Salidas de scripts ---
 resultados/
 caras_recortadas/
+caras_lfw/
 tests/.cache/
 
 # --- Sistema / editores ---
