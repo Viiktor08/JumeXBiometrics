@@ -1,0 +1,17 @@
+# Lo que no debe entrar en la imagen Docker (datos, claves, entornos, git).
+.git
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+.pytest_cache
+data
+models
+resultados
+caras_recortadas
+tests/.cache
+*.key
+.env
+.DS_Store
+Prácticas.pdf

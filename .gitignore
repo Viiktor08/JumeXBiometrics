@@ -1,0 +1,41 @@
+# --- Entornos y cachés de Python ---
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# --- Datos: fotos, base de datos y claves NUNCA van a git ---
+data/*
+!data/.gitkeep
+*.csv
+*.npy
+*.npz
+*.key
+.env
+
+# Fotos en cualquier carpeta (salvo las figuras de documentación en docs/)
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.webp
+*.tif
+*.tiff
+!docs/**
+
+# --- Modelos pesados: se descargan con scripts/descargar_modelos.py ---
+models/*
+!models/.gitkeep
+
+# --- Salidas de scripts ---
+resultados/
+caras_recortadas/
+tests/.cache/
+
+# --- Sistema / editores ---
+.DS_Store
+.idea/
+.vscode/
