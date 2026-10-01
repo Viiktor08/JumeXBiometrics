@@ -160,6 +160,8 @@ def _validar(cfg: Config) -> None:
         errores.append("los parámetros de calidad no pueden ser negativos")
     if cfg.bd.agregacion not in ("max", "media"):
         errores.append("bd.agregacion debe ser 'max' o 'media'")
+    if not (0.0 <= cfg.umbrales.verificacion <= 1.0 and 0.0 <= cfg.umbrales.identificacion <= 1.0):
+        errores.append("los umbrales deben estar en [0, 1] (las puntuaciones están en ese rango)")
     if cfg.limites.max_bytes_imagen <= 0 or cfg.limites.max_pixeles <= 0:
         errores.append("los límites de imagen deben ser positivos")
     if cfg.limites.max_pixeles > LIMITE_DURO_PIXELES:

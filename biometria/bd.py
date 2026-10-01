@@ -313,33 +313,3 @@ class BaseDatos:
         self._escribir_filas(nuevas)
         return existentes + 1
 
-
-def main() -> int:
-    """`python -m biometria.bd`: verifica la integridad y resume el contenido."""
-    import sys
-
-    from biometria.config import cargar_config
-    from biometria.errores import ErrorBiometrico
-    from biometria.extractores import crear_extractor
-
-    try:
-        cfg = cargar_config()
-        bd = BaseDatos(cfg, crear_extractor(cfg))
-        agrupadas = bd.por_id()
-    except ErrorBiometrico as e:
-        print(f"Error [{e.codigo}]: {e.mensaje}", file=sys.stderr)
-        return 1
-    if not cfg.bd.ruta.is_file():
-        print(f"La base de datos {cfg.bd.ruta} todavía no existe (se crea al inscribir).")
-        return 0
-    total = sum(len(t) for t in agrupadas.values())
-    print(f"{cfg.bd.ruta}: integridad OK · {len(agrupadas)} personas · {total} muestras")
-    print(f"Extractor: {bd.extractor} · templates "
-          f"{'cifrados (AES-GCM)' if cfg.bd.cifrar_templates else 'sin cifrar'}")
-    for id_persona in sorted(agrupadas):
-        print(f"  {id_persona}: {len(agrupadas[id_persona])} muestra(s)")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

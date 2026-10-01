@@ -21,7 +21,7 @@ de Docker), para que el grupo rival pueda ejecutarlo y atacarlo.
 | 2 | `detector` | YuNet, alineado por ojos, control de calidad y demo de cámara | ✅ |
 | 3 | `extractor` | Interfaz de extractor y LBP provisional | ✅ |
 | 4 | `bd-csv` | Base de datos CSV con validación e integridad (HMAC) | ✅ |
-| 5 | `sistema-cli` | `SistemaBiometrico` con los 9 métodos y la CLI | ⏳ |
+| 5 | `sistema-cli` | `SistemaBiometrico` con los 9 métodos y la CLI | ✅ |
 | 6 | `inscripcion-evaluacion` | Inscripción masiva; FAR/FRR/EER, DET/ROC, CMC | ⏳ |
 | 7 | `seguridad` | `THREAT_MODEL.md` y contramedidas | ⏳ |
 
@@ -34,12 +34,13 @@ docker build -t jumex-biometrics .
 docker run --rm -v "$(pwd)/data:/app/data" jumex-biometrics
 ```
 
-Ahora mismo el contenedor solo muestra el estado del entorno (versiones y si el
-modelo del detector está presente). Los comandos de los 9 métodos se añadirán en
-la fase 5 y tendrán esta forma:
+Sin argumentos muestra el estado del entorno. Los comandos son los mismos que
+en local (ver [Uso de la CLI](#uso-de-la-cli)); las fotos tienen que estar dentro
+de `data/` para que el contenedor las vea:
 
 ```bash
-docker run --rm -v "$(pwd)/data:/app/data" jumex-biometrics verificar --id "Persona" --foto data/foto.jpg
+docker run --rm -v "$(pwd)/data:/app/data" jumex-biometrics inscribir --id "Ana López" --foto data/fotos/ana.jpg
+docker run --rm -v "$(pwd)/data:/app/data" jumex-biometrics verificar --id "Ana López" --foto data/fotos/ana_2.jpg
 ```
 
 Para pasar los tests dentro del contenedor:
@@ -58,9 +59,69 @@ python3.11 -m venv .venv
 source .venv/bin/activate            # en Windows: .venv\Scripts\activate
 pip install -r requirements-dev.txt
 python scripts/descargar_modelos.py  # baja YuNet a models/ y verifica su SHA256
-python -m biometria                  # comprueba el entorno
+python -m biometria                  # comprueba el entorno (ver "Uso de la CLI")
 pytest -q
 ```
+
+## Uso de la CLI
+
+Todos los comandos imprimen **una línea JSON**. Código de salida: `0` si la
+operación se ha ejecutado (una verificación rechazada también da 0: mira
+`aceptado`), `1` si hay un error controlado y `2` si faltan argumentos.
+
+| Comando | Qué hace |
+|---|---|
+| `inscribir --id ID --foto F` | Inscribe una muestra (detector → calidad → alineado → extractor → BD) |
+| `verificar --id ID --foto F` | 1:1, ¿es ID la persona de la foto? |
+| `identificar --foto F` | 1:N, ¿quién es? (`null` si nadie supera el umbral) |
+| `inscribir_sd` / `verificar_sd` / `identificar_sd` | Igual, pero la foto **ya es una cara recortada**: sin detector ni alineado |
+| `inscribir_t --id ID --template T` / `verificar_t` / `identificar_t --template T` | Reciben un **template**: sin detector ni extractor |
+| `extraer --foto F --salida T [--sin-detector]` | Guarda el template de una foto (para usar con los `_t`) |
+| `bd` | Verifica la integridad de la BD y lista los inscritos |
+| `estado` (o sin comando) | Versiones y estado del entorno |
+
+```bash
+python -m biometria inscribir --id "Ana López" --foto data/fotos/ana.jpg
+# {"operacion": "inscribir", "id": "Ana López", "muestras": 1}
+
+python -m biometria verificar --id "Ana López" --foto data/fotos/ana_2.jpg
+# {"operacion": "verificar", "id": "Ana López", "aceptado": true, "puntuacion": 0.81, "umbral": 0.5}
+
+python -m biometria identificar --foto data/fotos/quien.jpg
+# {"operacion": "identificar", "identificado": true, "id": "Ana López", "puntuacion": 0.81, "umbral": 0.5}
+
+python -m biometria extraer --foto data/fotos/ana.jpg --salida ana.npy
+python -m biometria verificar_t --id "Ana López" --template ana.npy
+
+python -m biometria verificar --id "Nadie" --foto data/fotos/ana.jpg
+# {"error": "id_no_inscrito", "mensaje": "'Nadie' no está inscrito"}
+```
+
+Los templates (`--template`, `--salida`) pueden ser `.npy` (float32; nunca se
+cargan objetos con pickle), `.json` (lista de números) o texto con el formato de
+la BD (`f32:` + base64). Códigos de error posibles: `imagen_invalida`,
+`imagen_demasiado_grande`, `sin_cara`, `varias_caras`, `cara_pequena`,
+`imagen_borrosa`, `template_invalido`, `id_invalido`, `id_no_inscrito`,
+`limite_muestras`, `bd_corrupta`, `integridad_bd` y `configuracion_invalida`.
+
+Desde Python:
+
+```python
+from biometria.sistema import SistemaBiometrico
+
+sistema = SistemaBiometrico()                       # o SistemaBiometrico(cargar_config("otra.yaml"))
+sistema.inscribir("Ana López", "data/fotos/ana.jpg")  # la foto: ruta, bytes o array BGR
+sistema.verificar("Ana López", "data/fotos/ana_2.jpg")
+# ResultadoVerificacion(id='Ana López', aceptado=True, puntuacion=0.81, umbral=0.5)
+sistema.identificar("data/fotos/quien.jpg")
+# ResultadoIdentificacion(id='Ana López', puntuacion=0.81, umbral=0.5)
+t = sistema.extraer("data/fotos/ana.jpg")
+sistema.verificar_t("Ana López", t)
+```
+
+> **Aviso:** con el LBP provisional y el umbral de 0,5, `verificar` acepta
+> prácticamente a cualquiera (ver [Extractor](#extractor)). El umbral se
+> calibrará en la fase 6.
 
 ## Detector y cámara
 
@@ -190,8 +251,8 @@ Allyson Felix,f32:AADAPgAAAD8AAAA...,51d9aa...
 Para comprobar la integridad y ver quién está inscrito:
 
 ```bash
-python -m biometria.bd
-# data/bd.csv: integridad OK · 41 personas · 41 muestras
+python -m biometria bd
+# {"operacion": "bd", "integridad": "ok", "personas": 41, "muestras": 41, "ids": {...}}
 ```
 
 Desde Python:
@@ -218,6 +279,8 @@ acentos y ñ), números, espacios y `. - _ '` (máximo 100 caracteres).
 │   ├── detector.py         YuNet + alineado + control de calidad
 │   ├── camara.py           demo en directo con la webcam
 │   ├── bd.py               base de datos CSV con HMAC y cifrado opcional
+│   ├── sistema.py          SistemaBiometrico: los 9 métodos
+│   ├── cli.py              línea de comandos (salida JSON)
 │   ├── extractores/        extractores intercambiables
 │   │   ├── base.py         interfaz común: extraer, comparar, validar_template
 │   │   └── lbp.py          LBP uniforme por rejilla (provisional)
@@ -323,6 +386,20 @@ Decisiones tomadas donde el enunciado es ambiguo o deja libertad:
     escrito de dos formas sea el mismo id.
 21. **`bd.csv` y la clave se crean con permisos `600`**: solo los lee el usuario
     que ejecuta el sistema.
+
+22. **Puntuación frente a una persona = máximo entre sus muestras**
+    (`bd.agregacion: max`, o `media`). En identificación gana la persona con la
+    puntuación más alta; si no llega al umbral, el resultado es `null`
+    (desconocido), pero se informa igualmente de la mejor puntuación.
+23. **Se devuelve la puntuación**, no solo la decisión, porque hace falta para la
+    evaluación (curvas DET/ROC) y para que el rival pueda medir el sistema. A
+    cambio facilita ataques de *hill-climbing* (ir modificando un template en
+    `verificar_t` hasta que suba la puntuación); irá en `THREAT_MODEL.md`.
+24. **`verificar` comprueba que el id está inscrito antes de procesar la foto**,
+    así un id inexistente responde rápido y con un error claro.
+25. **Comando extra `extraer`**: no lo pide el enunciado, pero sin él no hay
+    forma cómoda de obtener templates para probar los métodos `_t`.
+26. **Los métodos `_t` no cargan el detector**: funcionan aunque falte el modelo YuNet.
 
 ## Problemas frecuentes
 
