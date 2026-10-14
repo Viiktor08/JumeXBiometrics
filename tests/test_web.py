@@ -11,9 +11,10 @@ from biometria.bd import VARIABLE_CLAVE
 from biometria.config import RAIZ_REPO
 from biometria.errores import ConfiguracionInvalida, IdInvalido, TemplateInvalido
 from biometria.extractores import crear_extractor
+from biometria.extractores.arcface import MODELO_POR_DEFECTO as MODELO_ARCFACE
 from biometria.extractores.sface import MODELO_POR_DEFECTO, ExtractorSFace
 from biometria.web.analisis import Galeria, analizar
-from biometria.web.servidor import crear_servidor
+from biometria.web.servidor import Aplicacion, crear_servidor
 from tests.conftest import cfg_con
 
 import cv2  # noqa: I001
@@ -123,8 +124,10 @@ def test_analizar_guarda_cada_paso(cfg, tmp_path, detector, ruta_astronauta, mon
 # --- Servidor ------------------------------------------------------------------------
 
 @pytest.fixture
-def servidor(tmp_path, monkeypatch, detector):
-    """Servidor real en un puerto libre, con config LBP y BD temporal."""
+def config_web(tmp_path, monkeypatch, detector):
+    """config.yaml del repo (ArcFace) con la BD en una carpeta temporal."""
+    if not (RAIZ_REPO / MODELO_ARCFACE).is_file():
+        pytest.skip("Falta el modelo ArcFace: python scripts/descargar_modelos.py")
     monkeypatch.delenv(VARIABLE_CLAVE, raising=False)
     texto = (RAIZ_REPO / "config.yaml").read_text(encoding="utf-8")
     texto = texto.replace("ruta: data/bd.csv", f"ruta: {tmp_path / 'bd.csv'}")
@@ -132,12 +135,34 @@ def servidor(tmp_path, monkeypatch, detector):
     texto = texto.replace("modelo: models/", f"modelo: {RAIZ_REPO / 'models'}/")
     config = tmp_path / "config.yaml"
     config.write_text(texto, encoding="utf-8")
-    srv = crear_servidor(config, "127.0.0.1", 0)
+    return config
+
+
+PIN_ADMIN = "pin-de-prueba-1234"
+
+
+@pytest.fixture
+def servidor(config_web):
+    """Servidor real en un puerto libre, con config ArcFace, BD temporal y PIN conocido."""
+    srv = crear_servidor(config_web, "127.0.0.1", 0, admin_pass=PIN_ADMIN)
     hilo = threading.Thread(target=srv.serve_forever, daemon=True)
     hilo.start()
     yield srv.server_address[1]
     srv.shutdown()
     srv.server_close()
+
+
+def cookie_admin(puerto, pin=PIN_ADMIN):
+    """Inicia sesión de admin y devuelve la cookie para las siguientes peticiones."""
+    _, r, resp = peticion(puerto, "POST", "/api/login", pin.encode())
+    assert r["ok"], "el PIN de prueba debería ser correcto"
+    return resp.getheader("Set-Cookie").split(";")[0]
+
+
+@pytest.fixture
+def admin(servidor):
+    """Puerto de un servidor con sesión de admin ya abierta: (puerto, cabeceras)."""
+    return servidor, {"Cookie": cookie_admin(servidor)}
 
 
 def peticion(puerto, metodo, ruta, cuerpo=None, cabeceras=None):
@@ -153,46 +178,52 @@ def peticion(puerto, metodo, ruta, cuerpo=None, cabeceras=None):
 def test_web_sirve_la_interfaz(servidor):
     estado, cuerpo, r = peticion(servidor, "GET", "/")
     assert estado == 200 and b"JumeX Lens" in cuerpo
+    assert b'id="boton-camara"' in cuerpo and b'id="camara-video"' in cuerpo
     assert "frame-ancestors 'none'" in r.getheader("Content-Security-Policy")
+    # La cámara solo para la propia página; micrófono y ubicación, para nadie
+    assert r.getheader("Permissions-Policy") == "camera=(self), microphone=(), geolocation=()"
     assert peticion(servidor, "GET", "/static/app.js")[0] == 200
     assert peticion(servidor, "GET", "/static/../bd.py")[0] == 404
     assert peticion(servidor, "GET", "/static/no_existe.js")[0] == 404
 
 
-def test_web_flujo_inscribir_verificar_identificar(servidor, ruta_astronauta):
+def test_web_flujo_inscribir_verificar_identificar(admin, ruta_astronauta):
+    servidor, cab = admin  # inscribir y ver la BD exige sesión de administrador
     foto = ruta_astronauta.read_bytes()
-    estado, r, _ = peticion(servidor, "POST", "/api/inscribir?id=Eileen%20Collins", foto)
+    estado, r, _ = peticion(servidor, "POST", "/api/inscribir?id=Eileen%20Collins", foto, cab)
     assert estado == 200 and r["ok"] and r["resultado"]["nueva_persona"]
     assert r["detecciones"][0]["elegida"] and r["cara_alineada"].startswith("data:image/png;base64,")
-    assert r["template"]["dimension"] == 2891
+    assert r["template"]["dimension"] == 512
 
-    _, personas, _ = peticion(servidor, "GET", "/api/personas")
+    _, personas, _ = peticion(servidor, "GET", "/api/personas", cabeceras=cab)
     [p] = personas["personas"]
     assert p["id"] == "Eileen Collins" and p["foto"].startswith("/api/caras/")
-    estado, imagen, _ = peticion(servidor, "GET", p["foto"])
+    estado, imagen, _ = peticion(servidor, "GET", p["foto"], cabeceras=cab)
     assert estado == 200 and imagen[:2] == b"\xff\xd8"  # JPEG
 
-    _, r, _ = peticion(servidor, "POST", "/api/verificar?id=Eileen%20Collins", foto)
+    # Verificar como admin: devuelve la foto de la BD
+    _, r, _ = peticion(servidor, "POST", "/api/verificar?id=Eileen%20Collins", foto, cab)
     assert r["resultado"]["aceptado"] is True and r["resultado"]["foto"] == p["foto"]
 
-    _, r, _ = peticion(servidor, "POST", "/api/identificar", foto)
+    _, r, _ = peticion(servidor, "POST", "/api/identificar", foto, cab)
     assert r["resultado"]["id"] == "Eileen Collins"
     assert r["resultado"]["candidatos"][0]["id"] == "Eileen Collins"
 
-    _, estado_sistema, _ = peticion(servidor, "GET", "/api/estado")
+    _, estado_sistema, _ = peticion(servidor, "GET", "/api/estado", cabeceras=cab)
     assert estado_sistema["personas"] == 1 and estado_sistema["integridad"] == "ok"
 
 
-def test_web_errores_controlados(servidor, ruta_astronauta):
+def test_web_errores_controlados(admin, ruta_astronauta):
+    servidor, cab = admin
     foto = ruta_astronauta.read_bytes()
-    _, r, _ = peticion(servidor, "POST", "/api/verificar?id=Nadie", foto)
+    _, r, _ = peticion(servidor, "POST", "/api/verificar?id=Nadie", foto, cab)
     assert r["ok"] is False and r["error"]["error"] == "id_no_inscrito"
     assert len(r["detecciones"]) == 1  # se enseña la detección aunque falle después
-    _, r, _ = peticion(servidor, "POST", "/api/identificar", b"basura")
+    _, r, _ = peticion(servidor, "POST", "/api/identificar", b"basura", cab)
     assert r["error"]["error"] == "imagen_invalida"
-    estado, r, _ = peticion(servidor, "POST", "/api/inscribir?id=", foto)
+    estado, r, _ = peticion(servidor, "POST", "/api/inscribir?id=", foto, cab)
     assert estado == 400
-    estado, r, _ = peticion(servidor, "POST", "/api/inscribir?id=%3D1%2B1", foto)
+    estado, r, _ = peticion(servidor, "POST", "/api/inscribir?id=%3D1%2B1", foto, cab)
     assert r["error"]["error"] == "id_invalido"
 
 
@@ -214,7 +245,9 @@ def test_web_protecciones(servidor, ruta_astronauta):
     conexion.endheaders()
     assert conexion.getresponse().status == 413
     conexion.close()
-    assert peticion(servidor, "GET", "/api/caras/../../k.key")[0] == 404
+    # Path traversal en las fotos: como admin (si no, daría 403 antes de llegar a la ruta)
+    cab = {"Cookie": cookie_admin(servidor)}
+    assert peticion(servidor, "GET", "/api/caras/../../k.key", cabeceras=cab)[0] == 404
 
 
 def test_web_caja_manual(servidor, ruta_astronauta, astronauta, detector):
@@ -234,22 +267,24 @@ def test_web_caja_manual(servidor, ruta_astronauta, astronauta, detector):
     assert r["error"]["error"] == "cara_pequena"
 
 
-def test_web_analizar_no_toca_la_bd(servidor, ruta_astronauta):
-    peticion(servidor, "POST", "/api/analizar", ruta_astronauta.read_bytes())
-    _, estado, _ = peticion(servidor, "GET", "/api/estado")
+def test_web_analizar_no_toca_la_bd(admin, ruta_astronauta):
+    servidor, cab = admin
+    peticion(servidor, "POST", "/api/analizar", ruta_astronauta.read_bytes(), cab)
+    _, estado, _ = peticion(servidor, "GET", "/api/estado", cabeceras=cab)
     assert estado["personas"] == 0
 
 
-def test_web_eliminar_persona(servidor, ruta_astronauta):
+def test_web_eliminar_persona(admin, ruta_astronauta):
+    servidor, cab = admin
     foto = ruta_astronauta.read_bytes()
-    peticion(servidor, "POST", "/api/inscribir?id=Eileen", foto)
-    _, personas, _ = peticion(servidor, "GET", "/api/personas")
+    peticion(servidor, "POST", "/api/inscribir?id=Eileen", foto, cab)
+    _, personas, _ = peticion(servidor, "GET", "/api/personas", cabeceras=cab)
     url_foto = personas["personas"][0]["foto"]
-    estado, r, _ = peticion(servidor, "DELETE", "/api/personas?id=Eileen")
+    estado, r, _ = peticion(servidor, "DELETE", "/api/personas?id=Eileen", cabeceras=cab)
     assert estado == 200 and r["resultado"]["muestras_borradas"] == 1
-    assert peticion(servidor, "GET", "/api/personas")[1]["personas"] == []
-    assert peticion(servidor, "GET", url_foto)[0] == 404  # el retrato también se borra
-    assert peticion(servidor, "DELETE", "/api/personas?id=Eileen")[0] == 404
+    assert peticion(servidor, "GET", "/api/personas", cabeceras=cab)[1]["personas"] == []
+    assert peticion(servidor, "GET", url_foto, cabeceras=cab)[0] == 404  # el retrato también se borra
+    assert peticion(servidor, "DELETE", "/api/personas?id=Eileen", cabeceras=cab)[0] == 404
     conexion = http.client.HTTPConnection("127.0.0.1", servidor, timeout=30)
     conexion.request("DELETE", "/api/personas?id=Eileen")  # sin cabecera
     assert conexion.getresponse().status == 403
@@ -257,13 +292,14 @@ def test_web_eliminar_persona(servidor, ruta_astronauta):
 
 
 
-def test_web_identificar_varias_personas(servidor, astronauta):
+def test_web_identificar_varias_personas(admin, astronauta):
     # Dos copias de la misma persona y una tercera cara que no está inscrita (girada en espejo
     # no vale: sería la misma persona). Basta con comprobar que cada cara recibe su resultado.
+    servidor, cab = admin
     ok, foto_una = cv2.imencode(".png", astronauta)
-    peticion(servidor, "POST", "/api/inscribir?id=Eileen", foto_una.tobytes())
+    peticion(servidor, "POST", "/api/inscribir?id=Eileen", foto_una.tobytes(), cab)
     ok, foto_dos = cv2.imencode(".png", np.hstack([astronauta, astronauta]))
-    _, r, _ = peticion(servidor, "POST", "/api/identificar", foto_dos.tobytes())
+    _, r, _ = peticion(servidor, "POST", "/api/identificar", foto_dos.tobytes(), cab)
     assert r["ok"] and r["multiple"] and len(r["caras"]) == 2
     assert [c["numero"] for c in r["caras"]] == [1, 2]
     assert r["caras"][0]["caja"][0] < r["caras"][1]["caja"][0]          # izquierda a derecha
@@ -272,42 +308,43 @@ def test_web_identificar_varias_personas(servidor, astronauta):
     assert r["resultado"]["identificadas"] == 2 and r["resultado"]["desconocidas"] == 0
     # Marcando una cara a mano se vuelve al modo de una sola cara
     x, y, w, h = r["caras"][1]["caja"]
-    _, r, _ = peticion(servidor, "POST", f"/api/identificar?caja={x},{y},{w},{h}", foto_dos.tobytes())
+    _, r, _ = peticion(servidor, "POST", f"/api/identificar?caja={x},{y},{w},{h}", foto_dos.tobytes(), cab)
     assert not r.get("multiple") and r["resultado"]["id"] == "Eileen"
 
 
-def test_web_ficha_y_edicion_de_persona(servidor, ruta_astronauta, astronauta):
+def test_web_ficha_y_edicion_de_persona(admin, ruta_astronauta, astronauta):
+    servidor, cab = admin
     foto = ruta_astronauta.read_bytes()
-    peticion(servidor, "POST", "/api/inscribir?id=Eileen", foto)
+    peticion(servidor, "POST", "/api/inscribir?id=Eileen", foto, cab)
     ok, girada = cv2.imencode(".png", cv2.flip(astronauta, 1))
-    _, r, _ = peticion(servidor, "POST", "/api/inscribir?id=Eileen", girada.tobytes())
+    _, r, _ = peticion(servidor, "POST", "/api/inscribir?id=Eileen", girada.tobytes(), cab)
     assert r["resultado"]["muestras"] == 2 and len(r["resultado"]["clave"]) == 16
 
-    _, ficha, _ = peticion(servidor, "GET", "/api/persona?id=Eileen")
+    _, ficha, _ = peticion(servidor, "GET", "/api/persona?id=Eileen", cabeceras=cab)
     assert [m["principal"] for m in ficha["muestras"]] == [True, False]
     primera, segunda = (m["clave"] for m in ficha["muestras"])
-    assert all(peticion(servidor, "GET", m["foto"])[0] == 200 for m in ficha["muestras"])
+    assert all(peticion(servidor, "GET", m["foto"], cabeceras=cab)[0] == 200 for m in ficha["muestras"])
 
     # Elegir la segunda como principal
-    _, ficha, _ = peticion(servidor, "POST", f"/api/persona/principal?id=Eileen&clave={segunda}")
+    _, ficha, _ = peticion(servidor, "POST", f"/api/persona/principal?id=Eileen&clave={segunda}", None, cab)
     assert ficha["foto"].endswith(f"{segunda}.jpg")
-    assert peticion(servidor, "POST", "/api/persona/principal?id=Eileen&clave=" + "0" * 16)[0] == 404
+    assert peticion(servidor, "POST", "/api/persona/principal?id=Eileen&clave=" + "0" * 16, None, cab)[0] == 404
 
     # Borrar una muestra
-    _, r, _ = peticion(servidor, "DELETE", f"/api/muestras?id=Eileen&clave={primera}")
+    _, r, _ = peticion(servidor, "DELETE", f"/api/muestras?id=Eileen&clave={primera}", cabeceras=cab)
     assert r["resultado"]["quedan"] == 1
-    assert peticion(servidor, "DELETE", f"/api/muestras?id=Eileen&clave={primera}")[0] == 404
+    assert peticion(servidor, "DELETE", f"/api/muestras?id=Eileen&clave={primera}", cabeceras=cab)[0] == 404
 
     # Renombrar: las fotos se mueven con la persona
-    _, ficha, _ = peticion(servidor, "POST", "/api/persona/renombrar?id=Eileen&nuevo=Eileen%20Collins")
-    assert ficha["id"] == "Eileen Collins" and peticion(servidor, "GET", ficha["foto"])[0] == 200
-    assert peticion(servidor, "GET", "/api/persona?id=Eileen")[0] == 404
-    assert peticion(servidor, "POST", "/api/persona/renombrar?id=Eileen%20Collins&nuevo=%3Dmal")[0] == 400
+    _, ficha, _ = peticion(servidor, "POST", "/api/persona/renombrar?id=Eileen&nuevo=Eileen%20Collins", None, cab)
+    assert ficha["id"] == "Eileen Collins" and peticion(servidor, "GET", ficha["foto"], cabeceras=cab)[0] == 200
+    assert peticion(servidor, "GET", "/api/persona?id=Eileen", cabeceras=cab)[0] == 404
+    assert peticion(servidor, "POST", "/api/persona/renombrar?id=Eileen%20Collins&nuevo=%3Dmal", None, cab)[0] == 400
 
     # Borrar la última muestra elimina a la persona
-    _, r, _ = peticion(servidor, "DELETE", f"/api/muestras?id=Eileen%20Collins&clave={segunda}")
+    _, r, _ = peticion(servidor, "DELETE", f"/api/muestras?id=Eileen%20Collins&clave={segunda}", cabeceras=cab)
     assert r["resultado"]["quedan"] == 0
-    assert peticion(servidor, "GET", "/api/personas")[1]["personas"] == []
+    assert peticion(servidor, "GET", "/api/personas", cabeceras=cab)[1]["personas"] == []
 
 
 def test_web_dominio_del_tunel(tmp_path, monkeypatch, detector):
@@ -328,3 +365,85 @@ def test_web_dominio_del_tunel(tmp_path, monkeypatch, detector):
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+# --- Los más parecidos -------------------------------------------------------------------
+
+def _vector_al_azar(semilla, dimension=512):
+    v = np.random.default_rng(semilla).standard_normal(dimension)
+    return (v / np.linalg.norm(v)).astype(np.float32)
+
+
+def test_web_solo_lista_como_parecidos_a_los_que_superan_el_umbral(config_web, ruta_astronauta):
+    app = Aplicacion(config_web)
+    foto = ruta_astronauta.read_bytes()
+    assert app.operar("inscribir", "Eileen Collins", foto)["ok"]
+    # Personas "al azar": en 512 dimensiones, dos vectores al azar son casi
+    # perpendiculares (similitud ~0): nunca deben salir como parecidas
+    for i in range(5):
+        app.sistema.inscribir_t(f"Persona {i}", _vector_al_azar(i))
+
+    r = app.operar("identificar", None, foto)["resultado"]
+    assert r["identificado"] and r["id"] == "Eileen Collins"
+    assert r["parecido"] == app.cfg.umbrales.parecido == 0.30
+    assert [c["id"] for c in r["candidatos"]] == ["Eileen Collins"]
+
+    # Sin Eileen en la BD: desconocida, sin candidatos, pero con la puntuación del mejor
+    app.eliminar("Eileen Collins")
+    r = app.operar("identificar", None, foto)["resultado"]
+    assert not r["identificado"] and r["candidatos"] == []
+    assert 0.0 <= r["puntuacion"] < app.cfg.umbrales.parecido
+
+
+def test_web_estado_incluye_el_umbral_de_parecido(admin):
+    servidor, cab = admin
+    _, estado, _ = peticion(servidor, "GET", "/api/estado", cabeceras=cab)
+    assert estado["extractor"] == "arcface" and estado["dimension"] == 512
+    assert estado["umbrales"] == {"verificacion": 0.35, "identificacion": 0.40, "parecido": 0.30}
+
+
+# --- Roles: usuario (por defecto) y administrador (con PIN) ---------------------------------
+
+def test_login_logout_y_pin_incorrecto(servidor):
+    # PIN correcto abre sesión; uno incorrecto, 401
+    assert peticion(servidor, "POST", "/api/login", b"mal")[0] == 401
+    estado, r, resp = peticion(servidor, "POST", "/api/login", PIN_ADMIN.encode())
+    assert estado == 200 and r["admin"] is True
+    cab = {"Cookie": resp.getheader("Set-Cookie").split(";")[0]}
+    # Con la cookie se es admin; tras logout, deja de serlo
+    assert peticion(servidor, "GET", "/api/estado", cabeceras=cab)[1]["admin"] is True
+    peticion(servidor, "POST", "/api/logout", cabeceras=cab)
+    assert peticion(servidor, "GET", "/api/estado", cabeceras=cab)[1]["admin"] is False
+
+
+def test_usuario_no_puede_ver_ni_editar_la_bd(servidor, ruta_astronauta):
+    """Sin sesión (rol usuario) la base de datos no se ve ni se toca."""
+    foto = ruta_astronauta.read_bytes()
+    # Estado de usuario: sin umbrales ni recuento de personas
+    _, estado, _ = peticion(servidor, "GET", "/api/estado")
+    assert estado["admin"] is False and "umbrales" not in estado and "personas" not in estado
+    # Todo lo que toca la BD -> 403
+    assert peticion(servidor, "GET", "/api/personas")[0] == 403
+    assert peticion(servidor, "GET", "/api/persona?id=X")[0] == 403
+    assert peticion(servidor, "POST", "/api/inscribir?id=Eileen", foto)[0] == 403
+    assert peticion(servidor, "DELETE", "/api/personas?id=Eileen")[0] == 403
+    assert peticion(servidor, "POST", "/api/persona/renombrar?id=a&nuevo=b")[0] == 403
+
+
+def test_usuario_identifica_pero_sin_foto_ni_candidatos(servidor, ruta_astronauta):
+    """El usuario ve el veredicto y el nombre, pero no la foto de la BD ni los parecidos."""
+    cab = {"Cookie": cookie_admin(servidor)}
+    foto = ruta_astronauta.read_bytes()
+    peticion(servidor, "POST", "/api/inscribir?id=Eileen%20Collins", foto, cab)  # inscribe el admin
+
+    # Como usuario (sin cookie)
+    _, r, _ = peticion(servidor, "POST", "/api/identificar", foto)
+    res = r["resultado"]
+    assert res["id"] == "Eileen Collins" and res["identificado"] is True
+    assert res["puntuacion"] is not None          # el veredicto sí
+    assert "foto" not in res                        # pero no la foto de la BD
+    assert "candidatos" not in res                  # ni la lista de parecidos
+
+    # Verificar como usuario: aceptado, sin foto de la BD
+    _, r, _ = peticion(servidor, "POST", "/api/verificar?id=Eileen%20Collins", foto)
+    assert r["resultado"]["aceptado"] is True and "foto" not in r["resultado"]

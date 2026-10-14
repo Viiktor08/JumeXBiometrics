@@ -47,7 +47,7 @@ class ConfigCalidad:
 
 @dataclass(frozen=True)
 class ConfigExtractor:
-    nombre: str = "lbp"
+    nombre: str = "arcface"
     parametros: dict[str, Any] = field(default_factory=dict)
 
 
@@ -63,6 +63,9 @@ class ConfigBD:
 class ConfigUmbrales:
     verificacion: float = 0.5
     identificacion: float = 0.5
+    # Solo para mostrar: por debajo, un candidato "no se parece" (la web no lo lista
+    # entre los más parecidos). No interviene en ninguna decisión del sistema.
+    parecido: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,26 @@ class ConfigLimites:
     max_bytes_imagen: int = 10 * 1024 * 1024
     max_pixeles: int = 25_000_000
     max_muestras_por_id: int = 10
+
+
+@dataclass(frozen=True)
+class ConfigDefensa:
+    """Contramedidas frente a ataques (ver THREAT_MODEL.md). Todas se pueden
+    desactivar para medir el sistema sin ellas o para no romper el enunciado."""
+
+    # Paso 1: al añadir una muestra a una persona que ya existe, su similitud con
+    # las anteriores debe llegar a este umbral (0 = desactivado). Corta el
+    # envenenamiento de la inscripción (añadir otra cara con el nombre de la víctima).
+    coherencia_muestra: float = 0.0
+    # Paso 3 (hill-climbing): nº de decimales a los que se redondea la puntuación que
+    # devuelven los métodos _t (quien no ve la foto). Menos decimales = menos pistas
+    # para ir ajustando un template hasta colarlo. 0 = sin redondeo.
+    decimales_puntuacion_t: int = 0
+    # Paso 3: nº máximo de llamadas a verificar_t/identificar_t por id antes de
+    # frenarlas (0 = sin límite). Pensado contra el barrido automático de templates.
+    max_intentos_t: int = 0
+    # Ventana (segundos) en la que cuenta ese límite de intentos.
+    ventana_intentos_s: float = 60.0
 
 
 @dataclass(frozen=True)
@@ -81,6 +104,7 @@ class Config:
     bd: ConfigBD
     umbrales: ConfigUmbrales
     limites: ConfigLimites
+    defensa: ConfigDefensa
 
 
 def _seccion(datos: dict, nombre: str) -> dict:
@@ -105,6 +129,7 @@ def _construir(datos: dict, base: Path) -> Config:
     bd = _seccion(datos, "bd")
     umb = _seccion(datos, "umbrales")
     lim = _seccion(datos, "limites")
+    defe = _seccion(datos, "defensa")
 
     try:
         return Config(
@@ -122,7 +147,7 @@ def _construir(datos: dict, base: Path) -> Config:
                 umbral_borrosidad=float(cal.get("umbral_borrosidad", 50.0)),
             ),
             extractor=ConfigExtractor(
-                nombre=str(ext.get("nombre", "lbp")),
+                nombre=str(ext.get("nombre", "arcface")),
                 parametros=dict(ext.get("parametros") or {}),
             ),
             bd=ConfigBD(
@@ -134,11 +159,18 @@ def _construir(datos: dict, base: Path) -> Config:
             umbrales=ConfigUmbrales(
                 verificacion=float(umb.get("verificacion", 0.5)),
                 identificacion=float(umb.get("identificacion", 0.5)),
+                parecido=float(umb.get("parecido", 0.0)),
             ),
             limites=ConfigLimites(
                 max_bytes_imagen=int(lim.get("max_bytes_imagen", 10 * 1024 * 1024)),
                 max_pixeles=int(lim.get("max_pixeles", 25_000_000)),
                 max_muestras_por_id=int(lim.get("max_muestras_por_id", 10)),
+            ),
+            defensa=ConfigDefensa(
+                coherencia_muestra=float(defe.get("coherencia_muestra", 0.0)),
+                decimales_puntuacion_t=int(defe.get("decimales_puntuacion_t", 0)),
+                max_intentos_t=int(defe.get("max_intentos_t", 0)),
+                ventana_intentos_s=float(defe.get("ventana_intentos_s", 60.0)),
             ),
         )
     except (TypeError, ValueError) as e:
@@ -162,12 +194,22 @@ def _validar(cfg: Config) -> None:
         errores.append("bd.agregacion debe ser 'max' o 'media'")
     if not (0.0 <= cfg.umbrales.verificacion <= 1.0 and 0.0 <= cfg.umbrales.identificacion <= 1.0):
         errores.append("los umbrales deben estar en [0, 1] (las puntuaciones están en ese rango)")
+    if not 0.0 <= cfg.umbrales.parecido <= min(cfg.umbrales.verificacion, cfg.umbrales.identificacion):
+        errores.append("umbrales.parecido debe estar entre 0 y el menor de los otros dos umbrales")
     if cfg.limites.max_bytes_imagen <= 0 or cfg.limites.max_pixeles <= 0:
         errores.append("los límites de imagen deben ser positivos")
     if cfg.limites.max_pixeles > LIMITE_DURO_PIXELES:
         errores.append(f"limites.max_pixeles no puede superar el límite duro ({LIMITE_DURO_PIXELES})")
     if cfg.limites.max_muestras_por_id < 1:
         errores.append("limites.max_muestras_por_id debe ser >= 1")
+    if not 0.0 <= cfg.defensa.coherencia_muestra <= 1.0:
+        errores.append("defensa.coherencia_muestra debe estar en [0, 1]")
+    if not 0 <= cfg.defensa.decimales_puntuacion_t <= 10:
+        errores.append("defensa.decimales_puntuacion_t debe estar entre 0 y 10")
+    if cfg.defensa.max_intentos_t < 0:
+        errores.append("defensa.max_intentos_t no puede ser negativo")
+    if cfg.defensa.ventana_intentos_s <= 0:
+        errores.append("defensa.ventana_intentos_s debe ser positiva")
     if errores:
         raise ConfiguracionInvalida("; ".join(errores))
 

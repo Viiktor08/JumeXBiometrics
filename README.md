@@ -15,11 +15,10 @@ Python o desde una web, **JumeX Lens**.
 
 > **Estado:** las fases 1 a 5 del proyecto (detector, extractores, base de
 > datos, los 9 métodos y la CLI) y la demo web están terminadas y probadas
-> (175 tests). **Faltan** la evaluación formal del sistema y el modelo de
-> amenazas (fases 6 y 7), y **todavía no está asignada la técnica de
-> reconocimiento definitiva**: mientras tanto hay dos extractores
-> intercambiables, uno provisional (LBP) y uno de referencia (SFace). Los
-> detalles, sin maquillar, están en [Estado del proyecto](#estado-del-proyecto-y-trabajo-pendiente).
+> (195 tests). La técnica asignada, **ArcFace**, es el extractor principal, con
+> los umbrales calibrados sobre LFW (`scripts/evaluar.py`). **Faltan** las curvas
+> de la evaluación formal y el modelo de amenazas (fases 6 y 7). Los detalles,
+> sin maquillar, están en [Estado del proyecto](#estado-del-proyecto-y-trabajo-pendiente).
 
 ## Índice
 
@@ -76,11 +75,11 @@ Son los **9 métodos que pide el enunciado**. Además:
 
 - **Línea de comandos** con salida JSON (también dentro de Docker): pensada para que el grupo rival pueda ejecutar y atacar el sistema.
 - **API en Python** (`SistemaBiometrico`).
-- **Dos extractores intercambiables** con una línea de configuración: LBP (clásico, provisional) y SFace (red neuronal, de referencia).
+- **ArcFace** (la técnica asignada, red ResNet-50) como extractor principal, y otros dos intercambiables con una línea de configuración para comparar: SFace (red neuronal más ligera) y LBP (técnica clásica de textura).
 - **Base de datos en CSV** con firma HMAC por fila, cifrado opcional de los templates y escritura atómica.
-- **JumeX Lens**: web para verificar, identificar (incluso a varias personas en una foto), inscribir y editar la base de datos, con la animación de cada paso del pipeline.
+- **JumeX Lens**: web para verificar, identificar (incluso a varias personas en una foto), inscribir y editar la base de datos, con la animación de cada paso del pipeline. Las fotos se pueden subir o **hacer en el momento con la cámara**.
 - **Demo de cámara** en directo y varios scripts para revisar el detector y comparar caras.
-- **Dockerfile** y **175 tests**.
+- **Dockerfile** y **195 tests**.
 
 ---
 
@@ -95,7 +94,7 @@ python3 -m venv .venv && source .venv/bin/activate   # en Windows: .venv\Scripts
 pip install -r requirements-dev.txt
 python scripts/descargar_modelos.py                   # baja los modelos y verifica su SHA256
 python -m biometria                                   # comprueba que todo está en su sitio
-pytest -q                                             # 175 tests
+pytest -q                                             # 195 tests
 ```
 
 > Si el repo está en OneDrive o Dropbox, crea el entorno virtual **fuera** de la
@@ -124,7 +123,7 @@ escribió con cuidado pero no se ha podido construir en la máquina de desarroll
 # 1) Un conjunto de caras reales para probar: 50 personas de LFW
 python scripts/preparar_lfw.py                              # data/lfw/fotos/*.jpg y data/lfw/personas.csv
 
-# 2) Inscribirlas con el extractor SFace en una base de datos propia (data/lens/)
+# 2) Inscribirlas (extractor ArcFace) en la base de datos de la web (data/lens/)
 python scripts/inscribir_csv.py data/lfw/personas.csv --config config_lens.yaml
 
 # 3) Abrir la web
@@ -165,16 +164,19 @@ flowchart TD
 ```
 
 **Ejemplo real de lo que ocurre al verificar** (una foto de 250×250 píxeles,
-extractor SFace, umbral 68 %):
+extractor ArcFace, umbral 35 %):
 
 | Paso | Qué pasa | Resultado |
 |---|---|---|
 | Carga | Se valida el fichero y se decodifica | imagen 250×250 |
 | Detección | YuNet busca caras | 1 cara, confianza 92 % |
 | Calidad y alineado | Se comprueba tamaño y nitidez; se gira y recorta | cara de 112×112, nitidez 128 ✓ |
-| Extractor | SFace convierte la cara en números | template de 128 valores |
-| Comparación | Se compara con los templates guardados de "Jack Straw" | similitud 85 % |
-| Decisión | 85 % ≥ 68 % (umbral) | **aceptado** |
+| Extractor | ArcFace convierte la cara en números | template de 512 valores |
+| Comparación | Se compara con los templates guardados de "Jack Straw" | similitud 71 % |
+| Decisión | 71 % ≥ 35 % (umbral) | **aceptado** |
+
+Con otra persona cualquiera la similitud habría salido cerca del 0 %: con
+ArcFace, dos desconocidos puntúan de media un 2,6 %.
 
 ### Paso 1: cargar la imagen
 
@@ -240,10 +242,32 @@ misma interfaz (`biometria/extractores/base.py`): `extraer` (cara → template),
 a eso, **cambiar de técnica es añadir un fichero y cambiar una línea de
 `config.yaml`**; nada más se toca.
 
-Hay dos extractores:
+Hay tres extractores. **ArcFace es el que usa el sistema**; los otros dos se
+conservan para compararlos con él.
+
+**ArcFace** (`extractor.nombre: arcface`) — **la técnica asignada**. ArcFace
+(Deng et al., 2019) es una forma de *entrenar* una red de reconocimiento facial:
+cada persona del entrenamiento tiene un vector "centro" en una esfera y la red
+aprende a llevar sus caras hacia él, pero con un **margen angular** extra
+(`cos(θ + m)`, m = 0,5 rad). Así no basta con que la cara caiga del lado bueno:
+tiene que quedar claramente separada de cualquier otra persona. El resultado
+son vectores muy juntos para la misma persona y casi perpendiculares entre
+personas distintas.
+1. La cara alineada de 112×112 se pasa a RGB y se normaliza: `(píxel − 127,5) / 127,5`.
+2. Una **ResNet-50** entrenada con ArcFace sobre WebFace600K (~600 000
+   personas; modelo `w600k_r50` de InsightFace) la convierte en **512 números**.
+3. Se hace lo mismo con la cara **volteada** y se suman los dos vectores
+   (*test-time augmentation*): compensa pequeñas asimetrías de luz o pose.
+4. El vector se normaliza para que mida 1.
+
+Se ejecuta con el módulo `cv2.dnn` de OpenCV (unos 35 ms por cara en un
+portátil), sin PyTorch ni onnxruntime.
+
+**SFace** (`extractor.nombre: sface`) — red neuronal más ligera de OpenCV Zoo
+(128 números). Fue la referencia antes de tener asignada la técnica.
 
 **LBP** (*Local Binary Patterns*, `extractor.nombre: lbp`) — técnica clásica
-basada en la textura de la cara. Provisional.
+basada en la textura de la cara. Sirve de línea base.
 1. Se pasa la cara a gris.
 2. Cada píxel se compara con sus 8 vecinos: los que son más claros o iguales dan
    un 1, los demás un 0. Los 8 resultados forman un número de 8 bits (el
@@ -254,19 +278,22 @@ basada en la textura de la cara. Provisional.
    calcula un **histograma** de esas 59 clases.
 5. Los 49 histogramas, normalizados, se concatenan: **2891 números** (59 × 49).
 
-**SFace** (`extractor.nombre: sface`) — red neuronal de reconocimiento facial de
-OpenCV Zoo. Recibe la cara de 112×112 y devuelve **128 números**, normalizados
-para que el vector mida 1. Es la referencia fuerte: distingue personas mucho
-mejor que LBP (ver [Cuánto acierta](#cuánto-acierta)).
-
 ### Paso 5: comparar
 
 Cada extractor sabe medir cuánto se parecen dos templates, y **siempre devuelve
 una puntuación entre 0 y 1, donde 1 significa idénticos**. Así los umbrales
 significan lo mismo con cualquier técnica.
 
+- **ArcFace: similitud coseno** entre los vectores (como miden 1, es el
+  producto escalar), **recortada a 0**: `max(coseno, 0)`. Un coseno negativo solo
+  significa "nada en común", así que un desconocido sale cerca del 0 % en vez
+  del 50 % que daría `(coseno + 1)/2`.
+- SFace: similitud coseno, convertida con `(coseno + 1)/2`.
 - LBP: distancia chi-cuadrado entre histogramas, convertida con `1 − χ²/2`.
-- SFace: similitud coseno entre los vectores, convertida con `(coseno + 1)/2`.
+
+> Por eso **los umbrales dependen del extractor**: con SFace dos desconocidos
+> puntuaban de media un 54 % y con ArcFace un 2,6 %. Al cambiar de extractor hay
+> que recalibrarlos con `scripts/evaluar.py`.
 
 Si una persona tiene varias muestras guardadas, su puntuación es la **máxima**
 entre todas (o la **media**, con `bd.agregacion: media`).
@@ -396,13 +423,16 @@ se interpreta como una errata y reciben un **template**.
 | Modelo | Para qué | Tamaño | Origen y licencia |
 |---|---|---|---|
 | **YuNet** `face_detection_yunet_2023mar.onnx` | Detectar caras y sus 5 puntos | 228 KB | [OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) · MIT |
-| **SFace** `face_recognition_sface_2021dec.onnx` | Extractor de referencia (128 números) | 37 MB | [OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface) · Apache 2.0 |
-| **LBP** | Extractor provisional (2891 números) | — (algoritmo, implementado en `biometria/extractores/lbp.py` con numpy) | Ahonen et al., 2006 |
+| **ArcFace** `arcface_w600k_r50.onnx` | **Extractor principal** (512 números) | 167 MB | `w600k_r50.onnx` del paquete `buffalo_l` de [InsightFace](https://github.com/deepinsight/insightface/tree/master/model_zoo) · uso no comercial / investigación |
+| **SFace** `face_recognition_sface_2021dec.onnx` | Extractor para comparar (128 números) | 37 MB | [OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface) · Apache 2.0 |
+| **LBP** | Extractor clásico de línea base (2891 números) | — (algoritmo, implementado en `biometria/extractores/lbp.py` con numpy) | Ahonen et al., 2006 |
 
 - Los modelos **no están en el repositorio** (están en el `.gitignore`):
   `python scripts/descargar_modelos.py` los descarga a `models/` y **verifica su
   SHA256**, para que un modelo corrupto o sustituido no entre al sistema. Los hashes
-  esperados están en ese script.
+  esperados están en ese script. ArcFace solo se publica dentro de un zip de
+  ~290 MB (con otros modelos que no se usan): el script lo baja a un temporal,
+  extrae `w600k_r50.onnx`, verifica su hash y borra el zip.
 - Se usa el detector YuNet y no MTCNN porque viene integrado en OpenCV, pesa
   unos 230 KB, no necesita PyTorch ni TensorFlow y da los 5 puntos clave.
 - Los tests usan la foto oficial de la astronauta Eileen Collins (NASA, dominio
@@ -427,35 +457,56 @@ Para entender los números:
 - **Rank-1**: en identificación, qué proporción de veces acierta la persona
   correcta como primera opción.
 
-Medido con **144 personas de LFW con dos fotos cada una** (`varias_caras: mayor`):
+Se mide con [`scripts/evaluar.py`](scripts/evaluar.py), que es reproducible
+(mismas personas con la misma semilla). Toma personas de LFW con al menos 2
+fotos (hasta 4), compara **todos los pares** (genuinos = misma persona,
+impostores = personas distintas) y simula la identificación: la primera foto
+de cada persona hace de base de datos, el resto se identifican y personas con
+una sola foto en LFW hacen de desconocidos.
 
-| | LBP (provisional) | SFace (referencia) |
+```bash
+python scripts/evaluar.py --personas 400 --fotos 4 --desconocidos 600 --semilla 11 --tabla
+python scripts/evaluar.py --config config_lens.yaml ...    # con otra configuración
+```
+
+**ArcFace**, 392 personas · 1111 fotos · 1173 pares genuinos · 615 432 impostores:
+
+| | ArcFace | SFace (antes) |
 |---|---|---|
-| Similitud media, misma persona | 0,70 | 0,83 |
-| Similitud media, personas distintas | 0,68 | 0,54 |
-| **EER** | ≈ 37 % | **≈ 1,4 %** |
-| **Rank-1** (identificar entre 144) | 11 % (azar: 0,7 %) | **98,6 %** |
+| Similitud media, misma persona | 0,67 | 0,83 |
+| Similitud media, personas distintas | **0,03** | 0,54 |
+| p99 de personas distintas | 0,15 | 0,65 |
+| **EER** | **0,68 %** (umbral 0,158) | 1,60 % |
+| **Rank-1** (identificar) | **99,2 %** | 98,4 % |
+| Desconocidos confundidos con alguien | **0,17 %** | 4,3 % |
 
-Con SFace, según el umbral elegido:
+(SFace se midió con 200 personas: `--personas 200 --semilla 7`. ArcFace con
+esas mismas 200 da EER 0,82 % y rank-1 99,2 %.)
+
+Con ArcFace, según el umbral:
 
 | Umbral | FAR | FRR |
 |---|---|---|
-| 0,64 | 1,63 % | 1,39 % |
-| 0,66 | 0,47 % | 1,39 % |
-| **0,68** (verificación en JumeX Lens) | **0,05 %** | **2,08 %** |
-| **0,70** (identificación en JumeX Lens) | **0,01 %** | **3,47 %** |
+| 0,15 | 0,93 % | 0,68 % |
+| 0,20 | 0,13 % | 0,85 % |
+| 0,25 | 0,017 % | 0,85 % |
+| **0,30** (umbral de "parecido" de la web) | 0,0018 % | 0,85 % |
+| **0,35** (verificación) | **0,0005 %** | **0,85 %** |
+| **0,40** (identificación) | **0,0005 %** | **1,02 %** |
+| 0,50 | 0,0003 % | 4,0 % |
 
 **Cómo leer estos resultados, con honestidad:**
-- **LBP distingue poco**: personas distintas puntúan casi igual que la misma
-  persona. Cambiar su radio, vecinos o rejilla apenas lo mejora (EER entre 37 y
-  39 %). Con el umbral de `config.yaml` (0,5) aceptaría a cualquiera (FAR 100 %): **ese
-  umbral está sin calibrar**.
-- Las cifras salen de **scripts puntuales que no están en el repositorio**;
-  la evaluación reproducible (con FAR/FRR/EER, curvas DET/ROC y CMC) es la fase 6.
-- El umbral de SFace se eligió **sobre los mismos datos** con los que se mide, así
-  que las cifras son algo optimistas. Con las 50 fotos del profesor pueden variar.
-- LFW son fotos de internet con mucha variación de pose y luz, y solo dos por
-  persona.
+- **ArcFace separa muchísimo mejor que SFace**: no tanto porque acierte más la
+  misma persona, sino porque **dos desconocidos dan casi 0** en vez del ~54 %.
+  Por eso con SFace la web enseñaba "parecidos" al 65 % que no se parecían en nada.
+- Los FAR por debajo del 0,001 % son **unos pocos pares** de 615 432, y alguno es
+  probablemente un error de etiquetado de LFW (el impostor máximo, 0,91, tiene
+  pinta de ser la misma persona con dos nombres). Con más datos pueden cambiar.
+- Los umbrales se eligieron **sobre los mismos datos** con los que se miden, así
+  que las cifras son algo optimistas. Hay que confirmarlas con las 50 fotos del profesor.
+- LFW son fotos de internet con mucha variación de pose y luz. Con fotos de la
+  cámara (frontales y bien iluminadas) las puntuaciones genuinas suelen ser más altas.
+- LBP (EER ≈ 37 %, rank-1 11 %) distingue muy poco; queda solo como línea base.
 
 ---
 
@@ -481,20 +532,20 @@ python -m biometria [--config FICHERO] <comando> [opciones]
 Cada comando imprime **una línea JSON** y devuelve un código de salida: `0` si la
 operación se ha ejecutado (una verificación rechazada también da 0: mira
 `aceptado`), `1` si hay un error controlado y `2` si faltan argumentos. Salidas
-reales (extractor SFace):
+reales (extractor ArcFace):
 
 ```bash
 python -m biometria --config config_lens.yaml verificar --id "Jack Straw" --foto data/lfw/pruebas/inscritos/Jack_Straw_0002.jpg
-# {"operacion": "verificar", "id": "Jack Straw", "aceptado": true, "puntuacion": 0.8458, "umbral": 0.68}
+# {"operacion": "verificar", "id": "Jack Straw", "aceptado": true, "puntuacion": 0.7147, "umbral": 0.35}
 
 python -m biometria --config config_lens.yaml verificar --id "Jack Straw" --foto data/lfw/pruebas/inscritos/Marc_Grossman_0002.jpg
-# {"operacion": "verificar", "id": "Jack Straw", "aceptado": false, "puntuacion": 0.5859, "umbral": 0.68}
+# {"operacion": "verificar", "id": "Jack Straw", "aceptado": false, "puntuacion": 0.0, "umbral": 0.35}
 
 python -m biometria --config config_lens.yaml identificar --foto data/lfw/pruebas/inscritos/Allyson_Felix_0003.jpg
-# {"operacion": "identificar", "identificado": true, "id": "Allyson Felix", "puntuacion": 0.7913, "umbral": 0.7}
+# {"operacion": "identificar", "identificado": true, "id": "Allyson Felix", "puntuacion": 0.5552, "umbral": 0.4}
 
 python -m biometria --config config_lens.yaml identificar --foto data/lfw/pruebas/desconocidos/Colin_Powell_0002.jpg
-# {"operacion": "identificar", "identificado": false, "id": null, "puntuacion": 0.6356, "umbral": 0.7}
+# {"operacion": "identificar", "identificado": false, "id": null, "puntuacion": 0.1353, "umbral": 0.4}
 
 python -m biometria --config config_lens.yaml verificar --id "Nadie" --foto data/fotos/ana.jpg
 # {"error": "id_no_inscrito", "mensaje": "'Nadie' no está inscrito"}      (código de salida 1)
@@ -537,9 +588,9 @@ from biometria.sistema import SistemaBiometrico
 sistema = SistemaBiometrico()                        # o SistemaBiometrico(cargar_config("otra.yaml"))
 sistema.inscribir("Ana López", "data/fotos/ana.jpg") # la foto: ruta, bytes o array BGR de numpy
 sistema.verificar("Ana López", "data/fotos/ana_2.jpg")
-# ResultadoVerificacion(id='Ana López', aceptado=True, puntuacion=0.81, umbral=0.5)
+# ResultadoVerificacion(id='Ana López', aceptado=True, puntuacion=0.68, umbral=0.35)
 sistema.identificar("data/fotos/quien.jpg")
-# ResultadoIdentificacion(id='Ana López', puntuacion=0.81, umbral=0.5)
+# ResultadoIdentificacion(id='Ana López', puntuacion=0.68, umbral=0.4)
 
 t = sistema.extraer("data/fotos/ana.jpg")            # el template (numpy float32)
 sistema.verificar_t("Ana López", t)
@@ -554,7 +605,9 @@ Los módulos sueltos también se pueden usar: `Detector` (`detectar`, `procesar`
 
 | Comando | Para qué sirve |
 |---|---|
-| `python scripts/descargar_modelos.py [--forzar]` | Descarga YuNet y SFace a `models/` y verifica su SHA256 |
+| `python scripts/descargar_modelos.py [--forzar]` | Descarga YuNet, ArcFace y SFace a `models/` y verifica su SHA256 |
+| `python scripts/evaluar.py [--config C] [--personas N] [--fotos K] [--tabla]` | Evalúa el extractor con LFW: genuinos/impostores, EER, umbral para un FAR objetivo, tabla FAR/FRR, rank-1 y desconocidos aceptados |
+| `python scripts/migrar_extractor.py [--config C] [--si]` | Al cambiar de extractor, rehace la BD de la web a partir de las fotos de su galería (con respaldo completo antes) |
 | `python scripts/preparar_lfw.py [--personas N] [--semilla S]` | Saca N personas de LFW a `data/lfw/` (fotos y `personas.csv` con `id,foto`) |
 | `python scripts/inscribir_csv.py FICHERO.csv [--config C]` | Inscribe en bloque a las personas de un CSV `id,foto` (y guarda su foto para la web) |
 | `python scripts/probar_detector.py CARPETA [--anotadas] [--recursivo] [--salida S]` | Pasa el detector por una carpeta y guarda las caras recortadas, las fotos anotadas y un `resumen.csv` (confianza, tamaño, nitidez) para calibrar la calidad |
@@ -566,10 +619,10 @@ Los módulos sueltos también se pueden usar: `Detector` (`detectar`, `procesar`
 
 ## JumeX Lens (la web)
 
-Interfaz para **ver el sistema funcionando**: se suelta una foto y se enseña cada
-paso del pipeline, con animación de detección y de escaneo. Usa
-[`config_lens.yaml`](config_lens.yaml): extractor **SFace**, una base de datos
-propia en `data/lens/` y umbrales 0,68 (verificación) y 0,70 (identificación).
+Interfaz para **ver el sistema funcionando**: se suelta una foto (o se hace con
+la cámara) y se enseña cada paso del pipeline, con animación de detección y de
+escaneo. Usa [`config_lens.yaml`](config_lens.yaml): extractor **ArcFace** y los
+mismos umbrales que `config.yaml`, con una base de datos propia en `data/lens/`.
 
 ```bash
 python scripts/descargar_modelos.py
@@ -582,13 +635,33 @@ python -m biometria.web                                                         
 | Pestaña | Qué hace |
 |---|---|
 | **Verificar** | Eliges una persona (con sugerencias) y sueltas una foto: responde "Sí, es X" / "No, no es X" con las dos caras lado a lado, una barra de similitud con el umbral marcado y la explicación |
-| **Identificar** | Responde "Esta persona es X" o "No está en la base de datos", con las 3 más parecidas. **Si la foto tiene varias personas, comprueba cada cara por separado** (hasta 12) y dice quién es cada una o que no la tiene guardada; las desconocidas tienen un botón "Inscribirla" |
+| **Identificar** | Responde "Esta persona es X" o "No está en la base de datos", con las personas que **de verdad** se le parecen (ver abajo). **Si la foto tiene varias personas, comprueba cada cara por separado** (hasta 12) y dice quién es cada una o que no la tiene guardada; las desconocidas tienen un botón "Inscribirla" |
 | **Inscribir** | Escribes el nombre y sueltas una foto. Pide confirmación ("¿Es esta la cara de X?") antes de guardar |
 | **Base de datos** | Las caras en cuadraditos con el nombre, un buscador y el estado de la integridad. Al pulsar una persona se abre su **ficha** |
 
 **La ficha de una persona** permite ver todas sus fotos (una por muestra),
-añadir otra, borrar una concreta, elegir la foto principal, cambiar el nombre o
-eliminar a la persona.
+añadir otra (subiéndola o con la cámara), borrar una concreta, elegir la foto
+principal, cambiar el nombre o eliminar a la persona.
+
+**Hacer la foto con la cámara.** En la zona de la foto (y en la ficha, para
+añadir muestras) hay un botón **"Hacer una foto con la cámara"**. Abre un visor
+con un óvalo de guía; se hace la foto, se revisa ("Usar esta foto" / "Repetir")
+y sigue el mismo camino que una foto subida. Detalles:
+- El navegador pide permiso la primera vez. Solo funciona en `localhost` o con
+  `https` (el túnel de Cloudflare lo es), porque los navegadores no dan la cámara
+  a páginas `http` normales.
+- La cámara se apaga en cuanto se cierra el visor. La foto se envía al servidor
+  local para analizarla, como cualquier otra.
+- Con la cámara frontal la imagen se ve y se guarda **en espejo**, como en el
+  móvil. A ArcFace le da igual: también compara la cara volteada.
+- Si hay varias cámaras (móvil), aparece "Cambiar de cámara".
+
+**Los más parecidos.** Al identificar solo se listan como parecidas las personas
+que superan `umbrales.parecido` (0,30). Por debajo, la similitud es la de dos
+desconocidos cualesquiera y ordenarlas sería ordenar ruido: antes, con SFace,
+salían personas al 65 % que no se parecían en nada. Si nadie llega, la web lo
+dice ("Nadie más se le parece" o "Nadie se le parece: la más cercana solo llega
+al 14 %") en vez de enseñar caras al azar.
 
 **Si el detector no encuentra la cara o elige otra**, se puede **marcar a mano**:
 arrastrando un recuadro sobre la foto o pulsando una de las caras detectadas. Se
@@ -608,13 +681,13 @@ envían como **cuerpo binario** de la petición.
 
 | Método y ruta | Qué hace |
 |---|---|
-| `GET /api/estado` | Extractor, umbrales, nº de personas e integridad de la BD |
+| `GET /api/estado` | Extractor, umbrales (verificación, identificación y parecido), nº de personas e integridad de la BD |
 | `GET /api/personas` | Lista de personas: `{id, muestras, foto}` |
 | `GET /api/persona?id=` | Ficha: las muestras de una persona con su foto |
 | `GET /api/caras/<persona>/<muestra>.jpg` | Foto de una muestra |
 | `POST /api/analizar` | Solo el pipeline (no toca la BD): detecciones, cara alineada, template |
 | `POST /api/verificar?id=` | Verifica contra esa persona |
-| `POST /api/identificar` | Identifica (a todas las caras si hay varias) |
+| `POST /api/identificar` | Identifica (a todas las caras si hay varias). `candidatos` solo trae a quien supera `umbrales.parecido`; `puntuacion` es siempre la del mejor |
 | `POST /api/inscribir?id=` | Inscribe una muestra |
 | `POST /api/persona/principal?id=&clave=` | Elige la foto principal |
 | `POST /api/persona/renombrar?id=&nuevo=` | Cambia el nombre |
@@ -626,16 +699,43 @@ la cara a mano. Las respuestas incluyen cada paso (`detecciones`, `cara_alineada
 `nitidez`, `template`, `tiempos_ms`) y el `resultado` o un `error` con el mismo
 código que la CLI.
 
+### Roles: usuario y administrador
+
+La web tiene **dos roles** (ver [`THREAT_MODEL.md`](THREAT_MODEL.md)):
+
+- **Usuario** (por defecto, sin contraseña): puede **verificar** e
+  **identificar**. Al identificar ve el nombre ("Es X" o "Desconocido") y el
+  porcentaje, pero **no la foto guardada ni la lista de parecidos**. No inscribe,
+  no borra y no ve la pestaña "Base de datos".
+- **Administrador** (con **PIN**): además inscribe, edita, borra y ve toda la BD.
+
+El PIN se fija con `--admin-pass`, la variable `BIOMETRIA_ADMIN_PASS`, o se
+genera uno aleatorio que se imprime al arrancar. Desde la web se entra con la
+**pastilla de arriba a la derecha**. El rol se comprueba en el **servidor** (no
+solo ocultando botones): pedir un endpoint de admin sin sesión da `403
+requiere_admin`.
+
+```bash
+python -m biometria.web --admin-pass TU_PIN      # PIN fijo (usa uno largo y no lo subas al repo)
+BIOMETRIA_ADMIN_PASS=TU_PIN python -m biometria.web
+```
+
 ### Seguridad de la web
 
 - Solo escucha en **`127.0.0.1`**.
+- **Roles usuario/admin** (arriba): lo que toca la base de datos exige sesión de
+  administrador, comprobada en el servidor.
 - Los `POST` y `DELETE` exigen la cabecera **`X-JumeX-Lens: 1`**: obliga al
   navegador a un permiso previo (*preflight*) que nunca se concede, y así otra web
   abierta en el navegador no puede usar la API (CSRF).
+- La sesión de admin va en una cookie **`HttpOnly; SameSite=Strict`** (no accesible
+  desde JavaScript); el PIN se compara en tiempo constante.
 - Rechaza peticiones cuyo **`Host`** no sea localhost (*DNS rebinding*).
 - El tamaño de la foto se comprueba **antes de leer el cuerpo**; solo se sirven los
   ficheros de la carpeta `static/`; el navegador recibe una *Content-Security-Policy*
   restrictiva.
+- `Permissions-Policy: camera=(self), microphone=(), geolocation=()`: solo la
+  propia página puede pedir la cámara, y nadie el micrófono ni la ubicación.
 
 ### Publicarla en internet (Cloudflare Tunnel)
 
@@ -644,11 +744,12 @@ brew install cloudflared            # una vez
 python -m biometria.web --tunel     # escribe la URL https://<algo>.trycloudflare.com
 ```
 
-El servidor **sigue en tu equipo** y Cloudflare reenvía las visitas: la web solo
-está online mientras el comando siga abierto y la URL cambia cada vez que se arranca.
-Se acepta además el dominio `trycloudflare.com`. **No tiene contraseña**: cualquiera
-con la URL puede ver las caras, inscribir y borrar. No la publiques con fotos de
-personas que no hayan dado su permiso.
+El servidor **sigue en tu equipo** y Cloudflare reenvía las visitas (sobre HTTPS):
+la web solo está online mientras el comando siga abierto y la URL cambia cada vez
+que se arranca. Se acepta además el dominio `trycloudflare.com`. Quien tenga la URL
+entra como **usuario** (solo verificar e identificar); para inscribir o ver la base
+de datos hace falta el **PIN de administrador**. Aun así, no la publiques con fotos
+de personas que no hayan dado su permiso.
 
 ---
 
@@ -670,22 +771,32 @@ configuración se **valida**: un valor fuera de rango da un error claro
 | `preprocesado` | `tam_cara` | `[112, 112]` | Tamaño de la cara alineada ([ancho, alto]) |
 | `calidad` | `tam_min_cara` | 60 | Lado mínimo de la cara (px) |
 | | `umbral_borrosidad` | 50 | Nitidez mínima (varianza del Laplaciano) |
-| `extractor` | `nombre` | `lbp` | `lbp` o `sface` |
-| | `parametros` | `radio: 1, puntos: 8, rejilla: [7, 7]` | Parámetros del extractor (SFace: `modelo`). `rejilla` es [columnas, filas] |
+| `extractor` | `nombre` | `arcface` | `arcface`, `sface` o `lbp` |
+| | `parametros` | `modelo: models/arcface_w600k_r50.onnx, voltear: true` | Parámetros del extractor. ArcFace: `modelo`, `voltear` (sumar la cara volteada). SFace: `modelo`. LBP: `radio`, `puntos`, `rejilla` ([columnas, filas]) |
 | `bd` | `ruta` | `data/bd.csv` | Dónde se guarda la base de datos |
 | | `ruta_clave` | `data/clave_hmac.key` | Fichero de la clave (si no hay variable de entorno) |
 | | `cifrar_templates` | `false` | Cifrar los templates con AES-GCM |
 | | `agregacion` | `max` | `max` o `media` de las muestras de una persona |
-| `umbrales` | `verificacion` | 0,5 | Puntuación mínima para aceptar al verificar |
-| | `identificacion` | 0,5 | Puntuación mínima para no devolver "desconocido" |
+| `umbrales` | `verificacion` | 0,35 | Puntuación mínima para aceptar al verificar |
+| | `identificacion` | 0,40 | Puntuación mínima para no devolver "desconocido" |
+| | `parecido` | 0,30 | Solo para mostrar: la web no lista como "parecido" a quien quede por debajo. No interviene en ninguna decisión |
 | `limites` | `max_bytes_imagen` | 10 MiB | Tamaño máximo del fichero de imagen |
 | | `max_pixeles` | 25 Mpx | Tamaño máximo en píxeles |
 | | `max_muestras_por_id` | 10 | Muestras máximas por persona |
+| `defensa` | `coherencia_muestra` | 0,20 | Al añadir una muestra a alguien que ya existe, similitud mínima con las suyas (0 = desactivado). Contra el envenenamiento de la inscripción |
+| | `decimales_puntuacion_t` | 2 | Decimales a los que se redondea la puntuación que devuelven los `_t` (0 = sin redondeo). Contra el hill-climbing |
+| | `max_intentos_t` | 50 | Máx. comparaciones `_t` por id en la ventana (0 = sin límite). Contra el hill-climbing |
+| | `ventana_intentos_s` | 60 | Ventana del límite anterior, en segundos |
 
-`config_lens.yaml` cambia: `extractor: sface`, `bd` en `data/lens/`, `varias_caras:
-mayor`, `umbral_borrosidad: 40` (más permisivo con fotos de internet) y los
-umbrales 0,68 / 0,70. **Los umbrales de `config.yaml` (0,5) son provisionales** y
-están pensados para recalibrarse con las fotos del profesor.
+**Variables de entorno:** `BIOMETRIA_CONFIG` (configuración), `BIOMETRIA_HMAC_KEY`
+(clave de la BD) y `BIOMETRIA_ADMIN_PASS` (PIN de administrador de la web).
+
+`config_lens.yaml` cambia: `bd` en `data/lens/`, `varias_caras: mayor` y
+`umbral_borrosidad: 40` (más permisivo con fotos de internet y de la cámara del
+portátil); el extractor y los umbrales son los mismos. **Los umbrales están
+calibrados con LFW** (ver [Cuánto acierta](#cuánto-acierta)) y conviene
+confirmarlos con las fotos del profesor. **Si se cambia de extractor hay que
+recalibrarlos**: cada técnica puntúa en una escala distinta.
 
 **Variables de entorno:** `BIOMETRIA_CONFIG` (fichero de configuración) y
 `BIOMETRIA_HMAC_KEY` (clave de la base de datos; tiene prioridad sobre el fichero).
@@ -695,24 +806,28 @@ están pensados para recalibrarse con las fotos del profesor.
 ## Seguridad
 
 El enunciado pide que cada grupo evalúe su sistema suponiendo que **un atacante se
-salta alguna parte, lee la base de datos o incluso escribe en ella**. Lo que el
-sistema hace hoy frente a cada caso:
+salta alguna parte, lee la base de datos o incluso escribe en ella**. El análisis
+completo, con cada ataque probado (`scripts/atacar.py`), está en
+[**`THREAT_MODEL.md`**](THREAT_MODEL.md). Resumen de lo que hace el sistema:
 
 | Amenaza | Qué hace el sistema |
 |---|---|
 | **Modifica o manipula `bd.csv`** (cambiar, copiar entre personas, borrar, duplicar o reordenar filas) | Lo detecta: firma HMAC por fila con su posición y el total → `integridad_bd`. No se puede inscribir encima de una BD manipulada |
-| **Lee `bd.csv`** | Ve los templates (con el cifrado desactivado). Cifrado AES-256-GCM opcional, pero la clave está por defecto en el mismo equipo |
-| **Se salta el detector** (`_sd`) | Se acepta cualquier imagen que pase la nitidez y se redimensione: es una superficie de ataque conocida. Una imagen sin cara se acepta |
-| **Se salta el extractor** (`_t`) | El template recibido se valida (dimensión, valores finitos, rangos), lo que filtra basura; **no impide** fabricar un template válido a medida |
+| **Envenenar la inscripción** (añadir mi cara como muestra de la víctima) | ✅ Se rechaza: la muestra nueva debe parecerse a las de esa persona (`coherencia_muestra`) → `muestra_incoherente` |
+| **Cualquiera inscribe/borra/lee por la web** | ✅ Dos roles: usuario (verificar/identificar) y **admin con PIN**; la BD solo la ve y toca el admin |
+| **Se salta el extractor** (`_t`) con un template fabricado | ✅ El sistema **firma** los templates que genera; `_t` marca `fiable: true/false/null` (sigue aceptándolos, como pide el enunciado, pero avisa) |
+| **Hill-climbing** (ajustar un template probándolo hasta colarlo) | ✅ La puntuación de `_t` se **redondea** y hay **límite de intentos** por id → `demasiados_intentos`. El ataque pasa de ~20 000 a <50 intentos útiles |
+| **Lee `bd.csv`** | Ve los templates (con el cifrado desactivado). Cifrado AES-256-GCM opcional ⏳ (paso 6) |
+| **Se salta el detector** (`_sd`) | Se acepta cualquier imagen que pase la nitidez: superficie de ataque conocida ⏳ (paso 5) |
 | **Imágenes malintencionadas** | Límites de bytes y píxeles (doble), decodificación solo mediante OpenCV, nunca se cargan objetos con pickle |
 | **Nombres malintencionados** | Validación estricta de ids (sin saltos de línea, sin fórmulas de Excel, normalizados) |
-| **Pruebas repetidas hasta acertar** (*hill-climbing*) | El sistema **devuelve la puntuación** (hace falta para evaluarlo), lo que facilita ir ajustando un template hasta que suba. No hay límite de intentos |
-| **Web** | Ver [seguridad de la web](#seguridad-de-la-web) |
+| **Foto de una foto** (presentación) | ⏳ Sin detección de vivacidad todavía (paso 7) |
 
-Hay aspectos conocidos **sin resolver** (rollback, falta de límite de intentos,
-ausencia de detección de vivacidad —una foto de una foto engaña a cualquier
-extractor—, la web sin contraseña…). El documento de amenazas formal
-(`THREAT_MODEL.md`) **aún no está escrito**: es la fase 7.
+Las contramedidas de software están en la sección `defensa:` de la configuración
+y **se pueden desactivar** (poner a 0) para medir el sistema sin ellas o no romper
+la interoperabilidad del enunciado. **Pendientes** (⏳): cifrado por defecto y
+protección de rollback (paso 6), comprobar cara en `_sd` (paso 5) y vivacidad
+(paso 7). Ver [`THREAT_MODEL.md`](THREAT_MODEL.md).
 
 ---
 
@@ -728,8 +843,9 @@ extractor—, la web sin contraseña…). El documento de amenazas formal
 │   ├── detector.py               YuNet multiescala + calidad + alineado
 │   ├── extractores/
 │   │   ├── base.py               interfaz común: extraer, comparar, validar_template
-│   │   ├── lbp.py                LBP uniforme por rejilla (provisional)
-│   │   └── sface.py              SFace de OpenCV Zoo (referencia)
+│   │   ├── arcface.py            ArcFace ResNet-50 de InsightFace (el asignado)
+│   │   ├── sface.py              SFace de OpenCV Zoo (para comparar)
+│   │   └── lbp.py                LBP uniforme por rejilla (línea base)
 │   ├── bd.py                     base de datos CSV con HMAC, cifrado opcional y edición
 │   ├── config.py                 carga y validación de la configuración
 │   ├── errores.py                excepciones con código estable
@@ -739,12 +855,12 @@ extractor—, la web sin contraseña…). El documento de amenazas formal
 │       ├── analisis.py           pipeline paso a paso, varias caras, galería de fotos
 │       └── static/               interfaz: index.html, estilos.css, app.js, logo.svg
 ├── scripts/                      herramientas (ver "Scripts y herramientas")
-├── tests/                        175 tests con pytest
+├── tests/                        195 tests con pytest
 ├── docs/                         capturas para este README
 ├── data/                         (fuera de git) fotos, bases de datos, claves
 ├── models/                       (fuera de git) modelos descargados
-├── config.yaml                   configuración por defecto (LBP)
-├── config_lens.yaml              configuración de la web (SFace)
+├── config.yaml                   configuración por defecto (ArcFace)
+├── config_lens.yaml              configuración de la web (ArcFace, BD en data/lens/)
 ├── Dockerfile
 └── requirements*.txt             dependencias con versiones fijadas
 ```
@@ -753,17 +869,18 @@ extractor—, la web sin contraseña…). El documento de amenazas formal
 
 ## Tests
 
-`pytest -q` ejecuta **175 tests** en menos de 10 segundos. Cubren:
+`pytest -q` ejecuta **195 tests** en unos 15 segundos. Cubren:
 
 | Fichero | Qué comprueba |
 |---|---|
 | `test_imagen.py` | Carga segura: formatos, límites, imágenes corruptas |
-| `test_config.py` | Validación de la configuración |
+| `test_config.py` | Validación de la configuración (incluido el umbral de parecido) |
 | `test_detector.py` | Detección, caras muy grandes, calidad, alineado, imágenes reescaladas |
+| `test_arcface.py` | ArcFace: template de 512 con norma 1, similitud coseno recortada a 0, volteo, validación, configuración y la recuperación de la cara desde la galería que usa la migración |
 | `test_extractor.py` | LBP (códigos, patrones uniformes, normalización, comparación, validación de templates) |
 | `test_bd.py` | Formato del CSV, **ataques a la integridad** (modificar, copiar, borrar, duplicar, reordenar, clave incorrecta), cifrado, ids, edición |
 | `test_sistema.py` | Los 9 métodos, la CLI, los ficheros de template |
-| `test_web.py` | SFace, galería de fotos, la API (flujo completo, errores, protecciones, caja manual, varias caras, ficha, edición) |
+| `test_web.py` | SFace, galería de fotos, la API (flujo completo, errores, protecciones, caja manual, varias caras, ficha, edición, cámara permitida, **solo se listan los parecidos de verdad**) |
 
 El LBP se contrastó además con la implementación de referencia de scikit-image
 (los códigos coinciden salvo en empates exactos, que aquí cuentan como 1).
@@ -782,13 +899,13 @@ Algunos tests necesitan los modelos (`descargar_modelos.py`) y red la primera ve
 | 4 | `bd-csv` | Base de datos CSV con integridad (HMAC) | ✅ |
 | 5 | `sistema-cli` | `SistemaBiometrico` con los 9 métodos y la CLI | ✅ |
 | extra | `web`, `web-v2` | SFace, JumeX Lens, varias caras, ficha editable, Cloudflare Tunnel | ✅ |
+| — | `arcface` | **ArcFace como extractor principal**, umbrales calibrados (`evaluar.py`), migración de la BD, cámara en la web, "los más parecidos" filtrados | ✅ |
 | 6 | `inscripcion-evaluacion` | Inscripción masiva de las 51 personas; FAR/FRR/EER, curvas DET/ROC y CMC | ⏳ |
 | 7 | `seguridad` | `THREAT_MODEL.md` y contramedidas | ⏳ |
 
 **Pendiente:**
-- **La técnica de reconocimiento asignada.** Cuando se sepa, se añade como extractor y se cambia en `config.yaml`; el resto del sistema no se toca.
-- **Las 50 fotos del profesor** y nuestra persona número 51 (se puede capturar con `python -m biometria.camara`).
-- **La evaluación reproducible** (fase 6) y la **calibración de los umbrales** de `config.yaml`.
+- **Las 50 fotos del profesor** y nuestra persona número 51 (se puede capturar con la cámara de la web o con `python -m biometria.camara`), y **confirmar con ellas los umbrales** calibrados en LFW.
+- **El resto de la evaluación** (fase 6): `scripts/evaluar.py` ya da FAR/FRR/EER y rank-1; faltan las **curvas** DET/ROC y CMC.
 - **El modelo de amenazas** (fase 7).
 - **Probar el Docker** (no se ha construido en la máquina de desarrollo).
 
@@ -836,7 +953,11 @@ Decisiones tomadas donde el enunciado es ambiguo o deja libertad:
 **Plataforma**
 22. **`verificar` comprueba que el id existe antes de procesar la foto**; **los métodos `_t` no cargan el detector**.
 23. **Versiones fijadas** (numpy 2.4.x, OpenCV 4.14 **completo**, no *headless*, porque la demo de cámara necesita `cv2.imshow`). Pensadas para Python 3.11 (la imagen de Docker); también funcionan en versiones posteriores.
-24. **La web usa SFace y su propia base de datos** (`data/lens/`), para no mezclar templates de extractores distintos con el `data/bd.csv` de la práctica.
+24. **La web usa su propia base de datos** (`data/lens/`), para no mezclar a las personas de la demo con el `data/bd.csv` de la práctica. Usa el mismo extractor (ArcFace) y los mismos umbrales.
+25. **ArcFace con `cv2.dnn`** y no con onnxruntime o PyTorch: no añade dependencias, y OpenCV ya está fijado en una versión.
+26. **Similitud de ArcFace = `max(coseno, 0)`** en vez de `(coseno + 1)/2`: así el porcentaje se lee de forma intuitiva (desconocidos ≈ 0 %) y la web no enseña a desconocidos como "parecidos al 50 %".
+27. **Umbral `parecido` aparte de los de decisión**: solo afecta a qué se enseña, nunca a si se acepta o se identifica a alguien.
+28. **Volteo en la extracción** (*test-time augmentation*): duplica el coste (~35 ms por cara) a cambio de templates más estables; se puede desactivar con `voltear: false`.
 
 ---
 
@@ -845,8 +966,9 @@ Decisiones tomadas donde el enunciado es ambiguo o deja libertad:
 - **`Address already in use` al arrancar la web:** queda un servidor anterior abierto. En macOS el proceso se llama `Python` (con mayúscula): `lsof -nP -iTCP:8000 -sTCP:LISTEN` te dice su PID y `kill <PID>` lo cierra. O arranca en otro puerto con `--puerto 8080`.
 - **`CERTIFICATE_VERIFY_FAILED` al descargar modelos en macOS:** el Python de python.org no trae certificados. Ejecuta `/Applications/Python\ 3.11/Install\ Certificates.command` o lanza el script con `SSL_CERT_FILE=/etc/ssl/cert.pem`.
 - **`integridad_bd` sin haber tocado nada:** la clave no es la que firmó la BD (se perdió `data/clave_hmac.key`, o `BIOMETRIA_HMAC_KEY` es otra). La BD no se puede recuperar sin su clave: hay que inscribir de nuevo.
-- **Un error dice que la BD se creó con otro extractor:** los templates guardados no tienen la dimensión del extractor actual (p. ej. una BD de LBP abierta con `config_lens.yaml`). Usa la configuración con la que se creó, o una BD nueva.
-- **La cámara no se abre:** en macOS hay que dar permiso a la terminal o a VS Code en *Ajustes del Sistema → Privacidad y seguridad → Cámara*. Docker en macOS no ve la cámara.
+- **Un error dice que la BD se creó con otro extractor:** los templates guardados no tienen la dimensión del extractor actual (p. ej. una BD de SFace o LBP abierta con ArcFace). Para la web, `python scripts/migrar_extractor.py` la rehace a partir de las fotos de la galería (con respaldo). Para `data/bd.csv`, que no guarda fotos, hay que inscribir de nuevo.
+- **La cámara de la web no se abre:** comprueba que entras por `http://127.0.0.1:8000` o `localhost` (no por la IP de la red local) o por la URL `https` del túnel; que no la tiene ocupada otra aplicación (Zoom, Teams…); y que el navegador tiene permiso (candado de la barra de direcciones).
+- **La demo `python -m biometria.camara` no abre la cámara:** en macOS hay que dar permiso a la terminal o a VS Code en *Ajustes del Sistema → Privacidad y seguridad → Cámara*. Docker en macOS no ve la cámara.
 - **La web no abre una foto del iPhone:** las fotos HEIC no están soportadas; expórtala como JPG.
 - **No detecta la cara en una foto:** pasa `python scripts/probar_detector.py` sobre la foto para ver qué ve el detector; o, en la web, márcala a mano.
 - **`ModuleNotFoundError: cv2` o fallos de límite de píxeles en un script propio:** importa `biometria` antes que `cv2`.
@@ -858,7 +980,7 @@ Decisiones tomadas donde el enunciado es ambiguo o deja libertad:
 | Término | Significado |
 |---|---|
 | **Template** | Vector de números que resume los rasgos de una cara. Es lo único que se guarda |
-| **Extractor** | El componente que convierte una cara en un template (LBP, SFace…) |
+| **Extractor** | El componente que convierte una cara en un template (ArcFace, SFace, LBP) |
 | **Muestra** | Un template guardado de una persona. Una persona puede tener varias |
 | **Landmarks / puntos clave** | Los 5 puntos de la cara (ojos, nariz, comisuras de la boca) que usa el alineado |
 | **Alineado** | Girar y recortar la cara para que los ojos queden horizontales y a la misma altura |
@@ -879,6 +1001,8 @@ Decisiones tomadas donde el enunciado es ambiguo o deja libertad:
 ## Referencias
 
 - **YuNet:** Wu, W., Peng, H., Yu, S. *YuNet: A Tiny Millisecond-level Face Detector*. Machine Intelligence Research, 2023. Modelo en [OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet).
+- **ArcFace:** Deng, J., Guo, J., Xue, N., Zafeiriou, S. *ArcFace: Additive Angular Margin Loss for Deep Face Recognition*. CVPR, 2019. Modelo `w600k_r50` de [InsightFace](https://github.com/deepinsight/insightface).
+- **WebFace600K:** subconjunto limpio de WebFace260M. Zhu, Z. et al. *WebFace260M: A Benchmark Unveiling the Power of Million-Scale Deep Face Recognition*. CVPR, 2021.
 - **SFace:** Zhong, Y., Deng, W., Hu, J., Zhao, D., Li, X., Wen, D. *SFace: Sigmoid-Constrained Hypersphere Loss for Robust Face Recognition*. IEEE Transactions on Image Processing, 2021. Modelo en [OpenCV Zoo](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface).
 - **LBP:** Ahonen, T., Hadid, A., Pietikäinen, M. *Face Description with Local Binary Patterns: Application to Face Recognition*. IEEE TPAMI, 2006.
 - **LFW:** Huang, G. B., Ramesh, M., Berg, T., Learned-Miller, E. *Labeled Faces in the Wild*. University of Massachusetts Amherst, Technical Report 07-49, 2007. <https://vis-www.cs.umass.edu/lfw/>

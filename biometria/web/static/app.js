@@ -38,6 +38,7 @@ function icono(nombre) {
     mas: '<path d="M12 5v14M5 12h14"/>',
     papelera: '<path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6"/>',
     mano: '<path d="M18 11V6a2 2 0 0 0-4 0M14 10V4a2 2 0 0 0-4 0v2M10 10.5V6a2 2 0 0 0-4 0v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/>',
+    camara: '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3.5"/>',
   };
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
@@ -55,7 +56,8 @@ function iniciales(nombre) {
 /* ------------------------------------------------------------------ */
 const estado = {
   modo: "verificar",
-  personas: [],          // [{id, muestras, foto}]
+  admin: false,          // rol: false = usuario (por defecto), true = administrador
+  personas: [],          // [{id, muestras, foto}] (solo admin)
   sistema: null,         // /api/estado
   archivo: null,         // File pendiente o analizado
   bitmap: null,          // ImageBitmap de la foto
@@ -115,6 +117,9 @@ const ERRORES = {
   id_invalido: ["comparacion", "Nombre no válido", null],
   id_no_inscrito: ["comparacion", "Esa persona no está en la base de datos", "Revisa el nombre (usa las sugerencias) o inscríbela antes en la pestaña Inscribir."],
   limite_muestras: ["comparacion", "Esa persona ya tiene el máximo de fotos", null],
+  muestra_incoherente: ["comparacion", "Esta cara no se parece a esa persona", "La foto no coincide con las que ya tiene guardadas. Si de verdad es esa persona, usa una foto más parecida; si es otra, inscríbela con su propio nombre."],
+  requiere_admin: ["comparacion", "Necesitas ser administrador", "Esta acción (inscribir, borrar o ver la base de datos) es solo del administrador. Entra con el PIN desde la pastilla de arriba a la derecha."],
+  demasiados_intentos: ["comparacion", "Demasiados intentos seguidos", "Se han hecho muchas comparaciones en poco tiempo. Es una protección contra el ajuste automático de plantillas. Espera un momento y vuelve a intentarlo."],
   integridad_bd: ["comparacion", "¡La base de datos ha sido manipulada!", "La firma HMAC no cuadra: alguien ha modificado bd.csv fuera del sistema. Por seguridad no se usa."],
   bd_corrupta: ["comparacion", "La base de datos está dañada", null],
   configuracion_invalida: ["carga", "Error de configuración del servidor", null],
@@ -131,27 +136,61 @@ async function api(ruta, opciones = {}) {
   return datos;
 }
 
+// cargarEstado fija estado.admin; cargarPersonas lo mira, así que van EN ORDEN
+async function recargar() {
+  await cargarEstado();
+  await cargarPersonas();
+}
+
 async function cargarEstado() {
   const pastilla = $("#estado-sistema");
   try {
     const s = await api("/api/estado");
     estado.sistema = s;
-    const nombreExtractor = { sface: "SFace", lbp: "LBP" }[s.extractor] || s.extractor;
-    pastilla.classList.toggle("ok", s.integridad === "ok");
-    pastilla.classList.toggle("mal", s.integridad !== "ok");
-    $("#estado-texto").textContent = s.integridad === "ok"
-      ? `${nombreExtractor} · ${s.personas} personas · BD íntegra`
-      : "¡Base de datos manipulada!";
-    $("#pestana-bd-detalle").textContent = `${s.personas} personas inscritas`;
-    $("#pie-extractor").textContent =
-      `Extractor ${nombreExtractor} (${s.dimension} valores) · umbral verificación ${pct(s.umbrales.verificacion)} · identificación ${pct(s.umbrales.identificacion)}`;
+    estado.admin = !!s.admin;
+    aplicarRol();
+    const nombreExtractor = { arcface: "ArcFace", sface: "SFace", lbp: "LBP" }[s.extractor] || s.extractor;
+    if (estado.admin) {
+      // El admin ve el detalle del sistema: integridad, nº de personas y umbrales
+      pastilla.classList.toggle("ok", s.integridad === "ok");
+      pastilla.classList.toggle("mal", s.integridad !== "ok");
+      $("#estado-texto").textContent = s.integridad === "ok"
+        ? `${nombreExtractor} · ${s.personas} personas · BD íntegra`
+        : "¡Base de datos manipulada!";
+      $("#pestana-bd-detalle").textContent = `${s.personas} personas inscritas`;
+      $("#pie-extractor").textContent =
+        `Extractor ${nombreExtractor} (${s.dimension} valores) · umbral verificación ${pct(s.umbrales.verificacion)} · identificación ${pct(s.umbrales.identificacion)} · parecido ${pct(s.umbrales.parecido)}`;
+    } else {
+      // El usuario solo ve que el sistema está en marcha, sin cifras de la BD
+      pastilla.classList.add("ok");
+      pastilla.classList.remove("mal");
+      $("#estado-texto").textContent = `${nombreExtractor} · listo`;
+      $("#pie-extractor").textContent = `Extractor ${nombreExtractor} (${s.dimension} valores)`;
+    }
   } catch {
     pastilla.classList.add("mal");
     $("#estado-texto").textContent = "Sin conexión con el servidor";
   }
 }
 
+/** Ajusta la interfaz al rol: pastilla, pestañas de admin y autocompletado de nombres. */
+function aplicarRol() {
+  const rol = $("#rol");
+  rol.classList.toggle("es-admin", estado.admin);
+  $("#rol-texto").textContent = estado.admin ? "Administrador" : "Usuario";
+  rol.setAttribute("title", estado.admin ? "Sesión de administrador. Pulsa para salir." : "Modo usuario. Pulsa para entrar como administrador.");
+  $$(".pestana--admin").forEach((b) => { b.hidden = !estado.admin; });
+  // Si el usuario estaba en una pestaña de admin y ha dejado de serlo, vuelve a verificar
+  if (!estado.admin && (estado.modo === "inscribir" || estado.modo === "bd")) cambiarModo("verificar");
+}
+
 async function cargarPersonas() {
+  // La lista de personas es solo del admin (alimenta las sugerencias de verificar y la pestaña BD)
+  if (!estado.admin) {
+    estado.personas = [];
+    $("#lista-nombres").replaceChildren();
+    return;
+  }
   try {
     const datos = await api("/api/personas");
     if (datos.error) throw new Error(datos.error.mensaje);
@@ -163,6 +202,43 @@ async function cargarPersonas() {
   lista.replaceChildren(...estado.personas.map((p) => el("option", { value: p.id })));
   actualizarAyudaNombre();
   pintarBD();
+}
+
+/* ------------------------------------------------------------------ */
+/* Login de administrador                                              */
+/* ------------------------------------------------------------------ */
+function abrirLogin() {
+  if (estado.admin) { cerrarSesion(); return; }
+  const d = $("#login");
+  $("#login-pin").value = "";
+  $("#login-error").hidden = true;
+  d.showModal();
+  $("#login-pin").focus();
+}
+
+async function entrarAdmin(e) {
+  e.preventDefault();
+  const pin = $("#login-pin").value;
+  if (!pin) return;
+  try {
+    const r = await api("/api/login", { method: "POST", headers: { "X-JumeX-Lens": "1" }, body: pin });
+    if (!r.ok) throw new Error((r.error && r.error.mensaje) || "PIN incorrecto");
+    $("#login").close();
+    avisar("Has entrado como administrador");
+    await recargar();
+  } catch (err) {
+    const e2 = $("#login-error");
+    e2.textContent = err.message;
+    e2.hidden = false;
+    $("#login-pin").select();
+  }
+}
+
+async function cerrarSesion() {
+  try { await api("/api/logout", { method: "POST", headers: { "X-JumeX-Lens": "1" } }); } catch { /* da igual */ }
+  avisar("Has salido del modo administrador");
+  await recargar();
+  cambiarModo("verificar");
 }
 
 const buscarPersona = (nombre) => {
@@ -217,7 +293,10 @@ function actualizarAyudaNombre() {
   ayuda.className = "campo__ayuda";
   avatar.hidden = true;
   if (estado.modo === "verificar") {
-    if (!nombre.trim()) ayuda.textContent = `${estado.personas.length} personas disponibles. Escribe para ver sugerencias.`;
+    if (!estado.admin) {
+      // El usuario no ve la lista de la BD: escribe el nombre y comprueba
+      ayuda.textContent = "Escribe el nombre de la persona y sube su foto para comprobar si coincide.";
+    } else if (!nombre.trim()) ayuda.textContent = `${estado.personas.length} personas disponibles. Escribe para ver sugerencias.`;
     else if (persona) {
       ayuda.textContent = `✓ ${persona.id} está en la base de datos (${persona.muestras} muestra${persona.muestras > 1 ? "s" : ""})`;
       ayuda.classList.add("ok");
@@ -242,7 +321,12 @@ function prepararZona() {
 
   zona.addEventListener("click", abrir);
   zona.addEventListener("keydown", (e) => {
+    if (e.target !== zona) return; // p. ej. Enter sobre el botón de la cámara
     if ((e.key === "Enter" || e.key === " ") && !estado.archivo) { e.preventDefault(); abrir(); }
+  });
+  $("#boton-camara").addEventListener("click", (e) => {
+    e.stopPropagation(); // que no abra también el selector de ficheros
+    if (!estado.ocupado) abrirCamara(recibirArchivo);
   });
   selector.addEventListener("change", () => {
     if (selector.files[0]) recibirArchivo(selector.files[0]);
@@ -318,6 +402,7 @@ function mostrarBotones({ ejecutar = false, otra = false, manual = false, usar =
   boton.hidden = !ejecutar;
   boton.textContent = `${MODOS[estado.modo]?.boton || "Analizar"} esta foto`;
   $("#boton-otra").hidden = !otra;
+  $("#boton-otra-camara").hidden = !otra;
   $("#boton-manual").hidden = !manual;
   $("#boton-usar").hidden = !usar;
   $("#boton-cancelar").hidden = !cancelar;
@@ -972,7 +1057,7 @@ async function ejecutar({ operacion = null, rapido = false } = {}) {
     estado.caja = null;
     estado.cajaOrigen = null;
     estado.inscritoReciente = respuesta.resultado.id;
-    await Promise.all([cargarEstado(), cargarPersonas()]);
+    await recargar();
   }
 }
 
@@ -1087,8 +1172,10 @@ function pintarVariasCaras(respuesta) {
       detalle = `Similitud ${pct(c.puntuacion)} (umbral ${pct(r.umbral)})`;
     } else if (c.estado === "desconocida") {
       texto = el("p", {}, "A esta persona ", el("b", { text: "no la tengo guardada" }));
-      const mejor = c.candidatos?.[0];
-      detalle = mejor ? `La más parecida es ${mejor.id}, solo al ${pct(mejor.puntuacion)}` : "La base de datos está vacía";
+      const mejor = c.candidatos?.[0]; // solo si supera el umbral de parecido
+      detalle = mejor ? `Se parece algo a ${mejor.id} (${pct(mejor.puntuacion)}), pero no lo bastante`
+        : c.puntuacion != null ? `Nadie se le parece: la más cercana solo llega al ${pct(c.puntuacion)}`
+        : "La base de datos está vacía";
     } else {
       texto = el("p", {}, el("b", { text: "No puedo comprobar esta cara" }));
       detalle = ERRORES[c.error?.error]?.[1] || c.error?.mensaje || "";
@@ -1137,17 +1224,19 @@ function notaManual(respuesta) {
 function pintarResultado(respuesta, nombre) {
   const caja = $("#resultado");
   const contenido = el("div", { class: "aparece" });
+  // append(null) escribiría "null": las piezas opcionales (lista vacía, sin candidato...) se saltan
+  const anadir = (...nodos) => contenido.append(...nodos.filter((n) => n != null));
 
   if (!respuesta.ok) {
     const e = respuesta.error || { error: "desconocido", mensaje: "Error desconocido" };
     const [, titulo, ayuda] = ERRORES[e.error] || [null, "Algo ha fallado", null];
-    contenido.append(
+    anadir(
       veredicto(e.error === "integridad_bd" ? "no" : "aviso", e.error === "red" ? "Sin conexión" : "No se ha podido completar", titulo, ayuda || e.mensaje),
       ayuda && e.mensaje ? explicacion(el("b", { text: "Detalle técnico: " }), `${e.mensaje} (código ${e.error})`) : null,
     );
-    if (respuesta.retrato) contenido.append(el("div", { class: "caras" }, figuraCara(respuesta.retrato, "La que has subido", "Tu foto"), el("div"), el("div")));
+    if (respuesta.retrato) anadir(el("div", { class: "caras" }, figuraCara(respuesta.retrato, "La que has subido", "Tu foto"), el("div"), el("div")));
     if (puedeMarcar(respuesta) && ["sin_cara", "varias_caras", "cara_pequena", "imagen_borrosa"].includes(e.error)) {
-      contenido.append(el("div", { class: "acciones" },
+      anadir(el("div", { class: "acciones" },
         el("button", { class: "boton boton--principal", onclick: entrarSeleccion }, "Marcar la cara a mano")));
     }
     caja.replaceChildren(contenido);
@@ -1157,14 +1246,17 @@ function pintarResultado(respuesta, nombre) {
   const r = respuesta.resultado;
   if (estado.modo === "verificar") {
     const si = r.aceptado;
-    contenido.append(
+    // El usuario ve el veredicto pero no la foto guardada en la BD (r.foto llega sin él)
+    anadir(
       veredicto(si ? "si" : "no", si ? "Identidad confirmada" : "Identidad rechazada",
         si ? `Sí, es ${r.id}` : `No, no es ${r.id}`,
         si ? "La cara de la foto coincide con la guardada." : "La cara de la foto no coincide con la guardada."),
-      el("div", { class: "caras" },
-        figuraCara(respuesta.retrato, "La que has subido", "Tu foto"),
-        el("div", { class: `conector conector--${si ? "si" : "no"}` }, el("span", {}, icono(si ? "igual" : "distinto")), pct(r.puntuacion)),
-        figuraCara(r.foto, "En la base de datos", r.id)),
+      estado.admin
+        ? el("div", { class: "caras" },
+            figuraCara(respuesta.retrato, "La que has subido", "Tu foto"),
+            el("div", { class: `conector conector--${si ? "si" : "no"}` }, el("span", {}, icono(si ? "igual" : "distinto")), pct(r.puntuacion)),
+            figuraCara(r.foto, "En la base de datos", r.id))
+        : null,
       medidor(r.puntuacion, r.umbral, si ? "si" : "no"),
       explicacion(
         el("b", { text: "¿Por qué? " }),
@@ -1174,35 +1266,58 @@ function pintarResultado(respuesta, nombre) {
   } else if (estado.modo === "identificar") {
     if (r.multiple) { pintarVariasCaras(respuesta); return; }
     if (r.personas === 0) {
-      contenido.append(veredicto("duda", "Base de datos vacía", "No hay nadie con quien comparar", "Inscribe a alguien primero en la pestaña Inscribir."));
+      anadir(veredicto("duda", "Base de datos vacía", "No hay nadie con quien comparar", "Inscribe a alguien primero en la pestaña Inscribir."));
+    } else if (!estado.admin) {
+      // Vista de usuario: solo el nombre (o desconocido), sin foto de la BD ni candidatos
+      if (r.identificado) {
+        anadir(
+          veredicto("si", "Persona identificada", `Es ${r.id}`,
+            `La foto coincide con una persona de la base de datos (${pct(r.puntuacion)} de similitud).`),
+          el("div", { class: "caras caras--sola" }, figuraCara(respuesta.retrato, "La que has subido", "Tu foto")),
+          medidor(r.puntuacion, r.umbral, "si"));
+      } else {
+        anadir(
+          veredicto("duda", "Persona desconocida", "No está en la base de datos",
+            "La foto no coincide con nadie guardado."),
+          el("div", { class: "caras caras--sola" }, figuraCara(respuesta.retrato, "La que has subido", "Tu foto")),
+          medidor(r.puntuacion, r.umbral, "no"));
+      }
     } else if (r.identificado) {
-      contenido.append(
+      // Solo llegan los que superan el umbral de parecido; el identificado no se repite
+      const otros = (r.candidatos || []).filter((c) => c.id !== r.id);
+      anadir(
         veredicto("si", "Persona identificada", `Esta persona es ${r.id}`, `La más parecida de ${r.personas} personas, y supera el umbral.`),
         el("div", { class: "caras" },
           figuraCara(respuesta.retrato, "La que has subido", "Tu foto"),
           el("div", { class: "conector conector--si" }, el("span", {}, icono("igual")), pct(r.puntuacion)),
           figuraCara(r.foto, "En la base de datos", r.id)),
         medidor(r.puntuacion, r.umbral, "si"),
-        listaCandidatos(r.candidatos, r.umbral),
+        otros.length
+          ? listaCandidatos(otros, r.umbral, "También se le parecen")
+          : r.personas > 1 ? explicacion(el("b", { text: "Nadie más se le parece. " }),
+            `Las otras ${r.personas - 1} personas de la base de datos quedan por debajo del ${pct(r.parecido)}: lo que puntúan dos desconocidos cualesquiera.`) : null,
       );
     } else {
-      const mejor = r.candidatos?.[0];
-      contenido.append(
+      const mejor = r.candidatos?.[0]; // solo si supera el umbral de parecido
+      anadir(
         veredicto("duda", "Persona desconocida", "No está en la base de datos",
-          mejor ? `Nadie supera el umbral. La más parecida es ${mejor.id}, pero solo al ${pct(mejor.puntuacion)}.` : "Nadie supera el umbral."),
+          mejor ? `Nadie supera el umbral. La más parecida es ${mejor.id}, pero solo al ${pct(mejor.puntuacion)}.`
+                : `Nadie se le parece: la persona más cercana solo llega al ${pct(r.puntuacion)}.`),
         mejor ? el("div", { class: "caras" },
           figuraCara(respuesta.retrato, "La que has subido", "Tu foto"),
           el("div", { class: "conector conector--no" }, el("span", {}, icono("distinto")), pct(mejor.puntuacion)),
           figuraCara(mejor.foto, "La más parecida", mejor.id)) : null,
-        mejor ? medidor(mejor.puntuacion, r.umbral, "no") : null,
-        listaCandidatos(r.candidatos, r.umbral),
-        explicacion(el("b", { text: "¿Por qué? " }), `Para identificar a alguien su similitud tiene que superar el umbral (${pct(r.umbral)}). Si no, es más seguro decir "no lo conozco" que arriesgarse a confundirlo con otra persona.`),
+        medidor(r.puntuacion, r.umbral, "no"),
+        listaCandidatos(r.candidatos, r.umbral, "Se le parecen algo"),
+        explicacion(el("b", { text: "¿Por qué? " }),
+          `Para identificar a alguien su similitud tiene que superar el umbral (${pct(r.umbral)}). Si no, es más seguro decir "no lo conozco" que arriesgarse a confundirlo con otra persona.`,
+          mejor ? null : ` Solo se enseña como "parecido" a quien pase del ${pct(r.parecido)}; por debajo, la similitud es la de dos desconocidos.`),
       );
     }
   } else if (estado.modo === "inscribir") {
     const nueva = r.nueva_persona;
     const codigo = el("canvas");
-    contenido.append(
+    anadir(
       veredicto("si", nueva ? "Persona inscrita" : "Muestra añadida",
         nueva ? `${r.id}, bienvenido/a` : `Nueva foto para ${r.id}`,
         nueva ? "Ya está en la base de datos: prueba a verificarla o identificarla con otra foto."
@@ -1224,7 +1339,7 @@ function pintarResultado(respuesta, nombre) {
     return;
   }
   const nota = notaManual(respuesta);
-  if (nota) contenido.append(nota);
+  if (nota) anadir(nota);
   caja.replaceChildren(contenido);
 }
 
@@ -1304,7 +1419,7 @@ async function recargarFicha() {
 }
 
 async function tras_editar() {
-  await Promise.all([cargarEstado(), cargarPersonas()]);
+  await recargar();
 }
 
 function pintarFicha() {
@@ -1398,8 +1513,11 @@ function tileAnadir() {
       el("button", { class: "boton boton--secundario boton--pequeno", onclick: () => abrirEnInscribir(a.archivo), text: "Marcar la cara a mano" }),
       el("button", { class: "boton boton--enlace", onclick: () => { ficha.anadiendo = null; pintarFicha(); }, text: "Probar otra" }));
   }
-  const casilla = el("button", { class: "muestra muestra--anadir", onclick: () => $("#selector-ficha").click() },
-    icono("mas"), el("b", { text: "Añadir foto" }), el("small", { text: "Suelta una foto o haz clic" }));
+  const casilla = el("div", { class: "muestra muestra--anadir" },
+    el("button", { class: "muestra__elegir", onclick: () => $("#selector-ficha").click() },
+      icono("mas"), el("b", { text: "Añadir foto" }), el("small", { text: "Suelta una foto o haz clic" })),
+    el("button", { class: "boton boton--enlace muestra__camara", onclick: () => abrirCamara(analizarParaFicha) },
+      icono("camara"), "o hazte una foto"));
   ["dragenter", "dragover"].forEach((t) => casilla.addEventListener(t, (e) => { e.preventDefault(); casilla.classList.add("encima"); }));
   ["dragleave", "drop"].forEach((t) => casilla.addEventListener(t, () => casilla.classList.remove("encima")));
   casilla.addEventListener("drop", (e) => {
@@ -1499,7 +1617,144 @@ async function eliminarPersona(p, desdeFicha = false) {
   } catch (e) {
     avisar(`No se pudo eliminar: ${e.message}`);
   }
-  await Promise.all([cargarEstado(), cargarPersonas()]);
+  await recargar();
+}
+
+/* ------------------------------------------------------------------ */
+/* Cámara: hacerse una foto en el momento                              */
+/* ------------------------------------------------------------------ */
+// getUserMedia solo existe en contextos seguros: localhost o https (el túnel lo es)
+const camara = { stream: null, destino: null, frontal: true, camaras: 0 };
+
+const ERRORES_CAMARA = {
+  NotAllowedError: "Has denegado el permiso de la cámara. Actívalo en el candado de la barra de direcciones.",
+  SecurityError: "El navegador no permite usar la cámara en esta página.",
+  NotFoundError: "No se ha encontrado ninguna cámara en este equipo.",
+  OverconstrainedError: "No se ha encontrado ninguna cámara en este equipo.",
+  NotReadableError: "La cámara está ocupada por otra aplicación (¿Zoom, Teams, FaceTime?). Ciérrala y repite.",
+  AbortError: "La cámara no ha respondido. Prueba otra vez.",
+};
+
+/** Abre la cámara; al confirmar la foto se llama a destino(File). */
+async function abrirCamara(destino) {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    avisar("La cámara solo funciona en localhost o con https, y en un navegador que la admita.");
+    return;
+  }
+  camara.destino = destino;
+  const dialogo = $("#camara");
+  if (!dialogo.open) dialogo.showModal();
+  await encenderCamara();
+}
+
+function estadoCamara(texto, error = false) {
+  const nodo = $("#camara-estado");
+  nodo.textContent = texto || "";
+  nodo.classList.toggle("error", error);
+}
+
+function botonesCamara({ disparar = false, usar = false, repetir = false }) {
+  $("#camara-disparar").hidden = usar;
+  $("#camara-disparar").disabled = !disparar;
+  $("#camara-usar").hidden = !usar;
+  $("#camara-repetir").hidden = !repetir;
+  $("#camara-cambiar").hidden = usar || camara.camaras < 2;
+}
+
+async function encenderCamara() {
+  apagarCamara();
+  const video = $("#camara-video");
+  $("#camara-visor").classList.remove("congelada");
+  $("#camara-foto").hidden = true;
+  video.hidden = false;
+  botonesCamara({});
+  estadoCamara("Pidiendo permiso para usar la cámara…");
+  try {
+    camara.stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: camara.frontal ? "user" : "environment", width: { ideal: 1280 }, height: { ideal: 960 } },
+      audio: false,
+    });
+  } catch (e) {
+    estadoCamara(ERRORES_CAMARA[e.name] || `No se pudo abrir la cámara (${e.name || e.message}).`, true);
+    return;
+  }
+  if (!$("#camara").open) { apagarCamara(); return; } // se cerró mientras pedía permiso
+  video.srcObject = camara.stream;
+  // La frontal se ve como un espejo, igual que en el móvil
+  const ajustes = camara.stream.getVideoTracks()[0]?.getSettings?.() || {};
+  video.classList.toggle("espejo", ajustes.facingMode ? ajustes.facingMode === "user" : camara.frontal);
+  try { await video.play(); } catch { /* autoplay: se reproduce igualmente al estar muted */ }
+  try {
+    camara.camaras = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput").length;
+  } catch { camara.camaras = 1; }
+  estadoCamara("");
+  botonesCamara({ disparar: true });
+  $("#camara-disparar").focus();
+}
+
+function apagarCamara() {
+  camara.stream?.getTracks().forEach((t) => t.stop());
+  camara.stream = null;
+  const video = $("#camara-video");
+  if (video) video.srcObject = null;
+}
+
+function dispararCamara() {
+  const video = $("#camara-video");
+  const ancho = video.videoWidth, alto = video.videoHeight;
+  if (!camara.stream || !ancho) return;
+  const lienzoFoto = $("#camara-foto");
+  lienzoFoto.width = ancho;
+  lienzoFoto.height = alto;
+  const ctx = lienzoFoto.getContext("2d");
+  // Se guarda tal y como se veía (en espejo con la frontal); a ArcFace le da igual:
+  // también compara la cara volteada
+  if (video.classList.contains("espejo")) { ctx.translate(ancho, 0); ctx.scale(-1, 1); }
+  ctx.drawImage(video, 0, 0, ancho, alto);
+  video.hidden = true;
+  lienzoFoto.hidden = false;
+  $("#camara-visor").classList.add("congelada");
+  const flash = $("#camara-flash");
+  flash.classList.remove("activo");
+  void flash.offsetWidth;
+  flash.classList.add("activo");
+  estadoCamara("¿Sale bien? Úsala o repítela");
+  botonesCamara({ usar: true, repetir: true });
+  $("#camara-usar").focus();
+}
+
+function repetirCamara() {
+  $("#camara-visor").classList.remove("congelada");
+  $("#camara-foto").hidden = true;
+  $("#camara-video").hidden = false;
+  estadoCamara("");
+  botonesCamara({ disparar: !!camara.stream });
+}
+
+function usarFotoCamara() {
+  const destino = camara.destino;
+  $("#camara-foto").toBlob((blob) => {
+    if (!blob) { estadoCamara("No se pudo guardar la foto. Repite.", true); return; }
+    const archivo = new File([blob], `camara-${Date.now()}.jpg`, { type: "image/jpeg" });
+    $("#camara").close(); // el evento close apaga la cámara
+    destino?.(archivo);
+  }, "image/jpeg", 0.92);
+}
+
+function prepararCamara() {
+  const dialogo = $("#camara");
+  dialogo.addEventListener("close", () => { apagarCamara(); camara.destino = null; });
+  dialogo.addEventListener("click", (e) => { if (e.target === dialogo) dialogo.close(); }); // clic fuera
+  $("#camara-cerrar").addEventListener("click", () => dialogo.close());
+  $("#camara-disparar").addEventListener("click", dispararCamara);
+  $("#camara-usar").addEventListener("click", usarFotoCamara);
+  $("#camara-repetir").addEventListener("click", repetirCamara);
+  $("#camara-cambiar").addEventListener("click", () => { camara.frontal = !camara.frontal; encenderCamara(); });
+  // Espacio o Intro con el visor en marcha: hacer la foto
+  dialogo.addEventListener("keydown", (e) => {
+    if ((e.key === " " || e.key === "Enter") && e.target === dialogo && !$("#camara-disparar").disabled
+        && !$("#camara-disparar").hidden) { e.preventDefault(); dispararCamara(); }
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -1508,9 +1763,8 @@ async function eliminarPersona(p, desdeFicha = false) {
 let temporizadorAviso = 0;
 function avisar(texto) {
   const aviso = $("#aviso");
-  // Un <dialog> modal tapa todo lo demás: con la ficha abierta, el aviso va dentro
-  const dialogo = $("#ficha");
-  const destino = dialogo.open ? dialogo : document.body;
+  // Un <dialog> modal tapa todo lo demás: con uno abierto, el aviso va dentro del de más arriba
+  const destino = ["#camara", "#ficha"].map((s) => $(s)).find((d) => d.open) || document.body;
   if (aviso.parentElement !== destino) destino.append(aviso);
   aviso.textContent = texto;
   aviso.hidden = false;
@@ -1537,6 +1791,19 @@ function iniciar() {
   $("#nombre").addEventListener("keydown", (e) => { if (e.key === "Enter") ejecutar(); });
   $("#boton-ejecutar").addEventListener("click", (e) => { e.stopPropagation(); ejecutar(); });
   $("#boton-otra").addEventListener("click", (e) => { e.stopPropagation(); reiniciarTodo(); $("#selector").click(); });
+  $("#boton-otra-camara").addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (estado.ocupado) return;
+    reiniciarTodo();
+    abrirCamara(recibirArchivo);
+  });
+  prepararCamara();
+  // Login de administrador (pastilla de la cabecera)
+  $("#rol").addEventListener("click", abrirLogin);
+  $("#login-form").addEventListener("submit", entrarAdmin);
+  $("#login-cerrar").addEventListener("click", () => $("#login").close());
+  $("#login-cancelar").addEventListener("click", () => $("#login").close());
+  $("#login").addEventListener("click", (e) => { if (e.target === $("#login")) $("#login").close(); });
   $("#boton-manual").addEventListener("click", (e) => { e.stopPropagation(); entrarSeleccion(); });
   $("#boton-usar").addEventListener("click", (e) => { e.stopPropagation(); usarSeleccion(); });
   $("#boton-cancelar").addEventListener("click", (e) => { e.stopPropagation(); salirSeleccion(); });
@@ -1563,8 +1830,7 @@ function iniciar() {
   });
 
   cambiarModo("verificar");
-  cargarEstado();
-  cargarPersonas();
+  recargar();
 }
 
 document.addEventListener("DOMContentLoaded", iniciar);

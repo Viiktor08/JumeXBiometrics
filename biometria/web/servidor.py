@@ -34,16 +34,20 @@ y se rechazan las peticiones cuyo Host no sea localhost.
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import math
 import mimetypes
+import os
 import re
+import secrets
 import shutil
 import subprocess
 import threading
 import time
 import webbrowser
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -69,22 +73,54 @@ LADO_RETRATO_GRUPO = 192
 HOSTS_PERMITIDOS = {"127.0.0.1", "localhost", "[::1]"}
 DOMINIO_TUNEL = "trycloudflare.com"
 PATRON_URL_TUNEL = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+VARIABLE_ADMIN = "BIOMETRIA_ADMIN_PASS"
+COOKIE_SESION = "jumex_sesion"
 
 
 class Aplicacion:
-    """Estado compartido del servidor. Un único lock: la demo es local y YuNet/SFace
-    no garantizan ser seguros entre hilos."""
+    """Estado compartido del servidor. Un único lock: la demo es local y YuNet/ArcFace
+    no garantizan ser seguros entre hilos.
 
-    def __init__(self, ruta_config: Path):
+    Dos roles (ver THREAT_MODEL.md, paso de roles):
+      - usuario (cualquiera): verificar e identificar. En identificar solo ve el
+        veredicto y el nombre, nunca la foto de la BD ni la lista de parecidos.
+      - admin (con contraseña): además ve la base de datos, inscribe, borra y edita.
+    """
+
+    def __init__(self, ruta_config: Path, admin_pass: str | None = None):
         self.cfg = cargar_config(ruta_config)
         self.sistema = SistemaBiometrico(self.cfg)
         self.sistema.detector  # carga YuNet ya: si falta el modelo, falla al arrancar
         self.galeria = Galeria(self.cfg.bd.ruta.parent / "caras")
         self.lock = threading.Lock()
+        # Contraseña de admin: argumento > variable de entorno > una aleatoria (se
+        # imprime al arrancar). La comparación es en tiempo constante.
+        self.admin_pass = admin_pass or os.environ.get(VARIABLE_ADMIN) or secrets.token_urlsafe(9)
+        self.admin_pass_generada = not (admin_pass or os.environ.get(VARIABLE_ADMIN))
+        self._sesiones: set[str] = set()  # tokens de sesión admin vivos (en memoria)
         try:
             self.galeria.migrar(self.sistema.bd.claves_por_id())
         except ErrorBiometrico:
             pass  # BD rota: /api/estado lo enseñará
+
+    # ------------------------------------------------------------------ #
+    # Sesiones / roles
+    # ------------------------------------------------------------------ #
+    def login(self, contrasena: str) -> str | None:
+        """Comprueba la contraseña de admin y, si es correcta, crea una sesión."""
+        if not contrasena or not hmac.compare_digest(contrasena, self.admin_pass):
+            return None
+        token = secrets.token_urlsafe(24)
+        with self.lock:
+            self._sesiones.add(token)
+        return token
+
+    def logout(self, token: str | None) -> None:
+        with self.lock:
+            self._sesiones.discard(token or "")
+
+    def es_admin(self, token: str | None) -> bool:
+        return bool(token) and token in self._sesiones
 
     # ------------------------------------------------------------------ #
     # Fotos de la galería
@@ -108,21 +144,26 @@ class Aplicacion:
     # ------------------------------------------------------------------ #
     # Consultas
     # ------------------------------------------------------------------ #
-    def estado(self) -> dict:
+    def estado(self, admin: bool = True) -> dict:
         datos = {
             "extractor": self.sistema.extractor.nombre,
             "dimension": self.sistema.extractor.dimension,
-            "umbrales": {"verificacion": self.cfg.umbrales.verificacion,
-                         "identificacion": self.cfg.umbrales.identificacion},
             "agregacion": self.cfg.bd.agregacion,
             "max_muestras": self.cfg.limites.max_muestras_por_id,
+            "admin": admin,
         }
-        try:
-            claves = self.sistema.bd.claves_por_id()
-            datos.update(integridad="ok", personas=len(claves),
-                         muestras=sum(len(c) for c in claves.values()))
-        except ErrorBiometrico as e:
-            datos.update(integridad=e.codigo, mensaje=e.mensaje, personas=0, muestras=0)
+        # Los umbrales y el recuento de personas son información del sistema que solo
+        # ve el admin: a un usuario no le decimos cuánta gente hay ni con qué margen.
+        if admin:
+            datos["umbrales"] = {"verificacion": self.cfg.umbrales.verificacion,
+                                 "identificacion": self.cfg.umbrales.identificacion,
+                                 "parecido": self.cfg.umbrales.parecido}
+            try:
+                claves = self.sistema.bd.claves_por_id()
+                datos.update(integridad="ok", personas=len(claves),
+                             muestras=sum(len(c) for c in claves.values()))
+            except ErrorBiometrico as e:
+                datos.update(integridad=e.codigo, mensaje=e.mensaje, personas=0, muestras=0)
         return datos
 
     def personas(self) -> dict:
@@ -208,13 +249,14 @@ class Aplicacion:
         respuesta["error"] = error.a_dict()
         return respuesta
 
-    def operar(self, operacion: str, id_persona: str | None, foto: bytes, region=None) -> dict:
+    def operar(self, operacion: str, id_persona: str | None, foto: bytes,
+               region=None, admin: bool = True) -> dict:
         with self.lock:
             analisis = analizar(self.sistema, foto, region)
             respuesta = self._respuesta_analisis(analisis)
             # Identificar con varias caras: se comprueba cada una (salvo cara marcada a mano)
             if operacion == "identificar" and region is None and len(analisis.detecciones) >= 2:
-                return self._identificar_varias(analisis, respuesta)
+                return self._filtrar_rol(self._identificar_varias(analisis, respuesta), admin)
             if analisis.error is not None:
                 return self._error(respuesta, analisis.error)
             inicio = time.perf_counter()
@@ -223,25 +265,48 @@ class Aplicacion:
             except ErrorBiometrico as e:
                 return self._error(respuesta, e)
             respuesta["tiempos_ms"]["comparacion"] = round((time.perf_counter() - inicio) * 1000, 1)
+            return self._filtrar_rol(respuesta, admin)
+
+    def _filtrar_rol(self, respuesta: dict, admin: bool) -> dict:
+        """Recorta de la respuesta lo que un usuario no admin no debe ver: las fotos
+        guardadas en la BD y la lista de personas más parecidas. El usuario sigue
+        viendo el veredicto y el nombre identificado, pero nada que permita recorrer
+        la base de datos por parecido. Ver THREAT_MODEL.md (roles)."""
+        if admin:
             return respuesta
+        r = respuesta.get("resultado")
+        if isinstance(r, dict):
+            r.pop("candidatos", None)
+            r.pop("foto", None)           # foto de la persona de la BD (verificar/identificar)
+        for cara in respuesta.get("caras", []):
+            cara.pop("candidatos", None)
+            cara.pop("foto", None)
+        return respuesta
 
     def _analizar(self, _id: None, _analisis: Analisis) -> dict:
         return {}
 
     def _candidatos(self, template, n: int = N_CANDIDATOS) -> list[dict]:
+        """Las `n` personas más parecidas, pero solo las que superan umbrales.parecido.
+
+        Por debajo de ese umbral la puntuación es la de dos desconocidos cualesquiera:
+        enseñarlas como "parecidas" solo confunde (sería ordenar ruido).
+        """
         claves = self.sistema.bd.claves_por_id()
+        minimo = self.cfg.umbrales.parecido
         return [{"id": i, "puntuacion": p, "foto": self.url_foto(i, claves.get(i, []))}
-                for i, p in self.sistema.ranking(template, n)]
+                for i, p in self.sistema.ranking(template, n) if p >= minimo]
 
     def _verificar(self, id_persona: str, analisis: Analisis) -> dict:
-        r = self.sistema.verificar_t(id_persona, analisis.template)
+        r = self.sistema.verificar_t(id_persona, analisis.template, _contar=False)
         return {"id": r.id, "aceptado": r.aceptado, "puntuacion": r.puntuacion,
                 "umbral": r.umbral, "foto": self.url_foto(r.id)}
 
     def _identificar(self, _id: None, analisis: Analisis) -> dict:
-        r = self.sistema.identificar_t(analisis.template)
+        r = self.sistema.identificar_t(analisis.template, _contar=False)
         return {"id": r.id, "identificado": r.identificado, "puntuacion": r.puntuacion,
-                "umbral": r.umbral, "foto": self.url_foto(r.id) if r.id else None,
+                "umbral": r.umbral, "parecido": self.cfg.umbrales.parecido,
+                "foto": self.url_foto(r.id) if r.id else None,
                 "candidatos": self._candidatos(analisis.template),
                 "personas": len(self.sistema.bd.ids())}
 
@@ -266,13 +331,11 @@ class Aplicacion:
                 item.update(estado="descartada", error=cara.error.a_dict())
             else:
                 # Misma regla que identificar_t: el mejor candidato, si supera el umbral
-                candidatos = self._candidatos(cara.template)
-                mejor = candidatos[0] if candidatos else None
-                conocido = mejor is not None and mejor["puntuacion"] >= umbral
-                item.update(estado="identificada" if conocido else "desconocida",
-                            id=mejor["id"] if conocido else None,
-                            puntuacion=mejor["puntuacion"] if mejor else None,
-                            foto=mejor["foto"] if conocido else None, candidatos=candidatos)
+                r = self.sistema.identificar_t(cara.template, _contar=False)
+                item.update(estado="identificada" if r.identificado else "desconocida",
+                            id=r.id, puntuacion=r.puntuacion,
+                            foto=self.url_foto(r.id) if r.id else None,
+                            candidatos=self._candidatos(cara.template))
             lista.append(item)
 
         # El pipeline de la izquierda enseña la primera cara válida
@@ -284,7 +347,8 @@ class Aplicacion:
         for det in respuesta["detecciones"]:
             det["elegida"] = False
         respuesta.update(ok=True, multiple=True, caras=lista, resultado={
-            "multiple": True, "umbral": umbral, "personas": len(self.sistema.bd.ids()),
+            "multiple": True, "umbral": umbral, "parecido": self.cfg.umbrales.parecido,
+            "personas": len(self.sistema.bd.ids()),
             "identificadas": sum(c["estado"] == "identificada" for c in lista),
             "desconocidas": sum(c["estado"] == "desconocida" for c in lista),
             "descartadas": sum(c["estado"] == "descartada" for c in lista),
@@ -305,6 +369,8 @@ def _estado_http(error: ErrorBiometrico) -> int:
         return HTTPStatus.NOT_FOUND
     if error.codigo == "id_invalido":
         return HTTPStatus.BAD_REQUEST
+    if error.codigo == "demasiados_intentos":
+        return HTTPStatus.TOO_MANY_REQUESTS
     return HTTPStatus.CONFLICT
 
 
@@ -318,13 +384,18 @@ class Manejador(BaseHTTPRequestHandler):
     dominios_extra: tuple[str, ...] = ()  # además de localhost (túnel)
 
     # ------------------------------------------------------------------ #
-    def _enviar(self, estado: int, cuerpo: bytes, tipo: str, cache: bool = False) -> None:
+    def _enviar(self, estado: int, cuerpo: bytes, tipo: str, cache: bool = False,
+                cookies: list[str] | None = None) -> None:
         self.send_response(estado)
         self.send_header("Content-Type", tipo)
         self.send_header("Content-Length", str(len(cuerpo)))
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        for cookie in cookies or []:
+            self.send_header("Set-Cookie", cookie)
         self.send_header("Cache-Control", "max-age=300" if cache else "no-store")
+        # Cámara solo para la propia página (botón "Hacer una foto"); nada más
+        self.send_header("Permissions-Policy", "camera=(self), microphone=(), geolocation=()")
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; img-src 'self' data: blob:; script-src 'self'; "
@@ -335,12 +406,31 @@ class Manejador(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(cuerpo)
 
-    def _json(self, datos: dict, estado: int = HTTPStatus.OK) -> None:
+    def _json(self, datos: dict, estado: int = HTTPStatus.OK, cookies: list[str] | None = None) -> None:
         self._enviar(estado, json.dumps(datos, ensure_ascii=False).encode("utf-8"),
-                     "application/json; charset=utf-8")
+                     "application/json; charset=utf-8", cookies=cookies)
 
     def _fallo(self, estado: int, codigo: str, mensaje: str) -> None:
         self._json({"ok": False, "error": {"error": codigo, "mensaje": mensaje}}, estado)
+
+    # ------------------------------------------------------------------ #
+    # Rol (usuario por defecto; admin con sesión)
+    # ------------------------------------------------------------------ #
+    def _token(self) -> str | None:
+        cookie = SimpleCookie(self.headers.get("Cookie", ""))
+        morsel = cookie.get(COOKIE_SESION)
+        return morsel.value if morsel else None
+
+    def _es_admin(self) -> bool:
+        return self.app.es_admin(self._token())
+
+    def _exige_admin(self) -> bool:
+        """True si puede seguir; si no, responde 403 y devuelve False."""
+        if self._es_admin():
+            return True
+        self._fallo(HTTPStatus.FORBIDDEN, "requiere_admin",
+                    "Esta acción es solo para el administrador. Introduce el PIN de administrador.")
+        return False
 
     def _host_valido(self) -> bool:
         host = self.headers.get("Host") or ""
@@ -369,14 +459,21 @@ class Manejador(BaseHTTPRequestHandler):
                 return self._estatico(ruta.removeprefix("/static/"))
             if ruta == "/api/estado":
                 with self.app.lock:
-                    return self._json(self.app.estado())
+                    return self._json(self.app.estado(admin=self._es_admin()))
+            # La base de datos (lista, fichas y fotos) es solo para el admin
             if ruta == "/api/personas":
+                if not self._exige_admin():
+                    return
                 with self.app.lock:
                     return self._json(self.app.personas())
             if ruta == "/api/persona":
+                if not self._exige_admin():
+                    return
                 with self.app.lock:
                     return self._json(self.app.persona(self._parametro("id")))
             if ruta.startswith("/api/caras/"):
+                if not self._exige_admin():
+                    return
                 fichero = self.app.galeria.ruta_por_url(ruta[len("/api/caras/"):].split("/"))
                 if fichero is None:
                     return self._fallo(HTTPStatus.NOT_FOUND, "no_encontrado", "No hay retrato")
@@ -417,8 +514,23 @@ class Manejador(BaseHTTPRequestHandler):
         if self.headers.get("X-JumeX-Lens") != "1":
             return self._fallo(HTTPStatus.FORBIDDEN, "cabecera_requerida", "Falta la cabecera X-JumeX-Lens")
         partes = urlsplit(self.path)
-        # Edición de la BD (sin foto)
+        # Entrar / salir del modo administrador (el cuerpo es el PIN, no una foto)
+        if partes.path == "/api/login":
+            token = self.app.login(foto.decode("utf-8", "ignore").strip())
+            if token is None:
+                return self._fallo(HTTPStatus.UNAUTHORIZED, "pin_incorrecto", "PIN de administrador incorrecto")
+            # HttpOnly: el PIN/sesión no es accesible desde JavaScript (anti-XSS).
+            # SameSite=Strict + la cabecera X-JumeX-Lens ya cubren el CSRF.
+            cookie = f"{COOKIE_SESION}={token}; Path=/; HttpOnly; SameSite=Strict"
+            return self._json({"ok": True, "admin": True}, cookies=[cookie])
+        if partes.path == "/api/logout":
+            self.app.logout(self._token())
+            cookie = f"{COOKIE_SESION}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+            return self._json({"ok": True, "admin": False}, cookies=[cookie])
+        # Edición de la BD (sin foto): solo admin
         if partes.path in ("/api/persona/principal", "/api/persona/renombrar"):
+            if not self._exige_admin():
+                return
             try:
                 if partes.path.endswith("principal"):
                     datos = self.app.fijar_principal(self._parametro("id"), self._parametro("clave"))
@@ -430,6 +542,9 @@ class Manejador(BaseHTTPRequestHandler):
         operacion = partes.path.removeprefix("/api/")
         if operacion not in ("analizar", "verificar", "identificar", "inscribir"):
             return self._fallo(HTTPStatus.NOT_FOUND, "no_encontrado", f"No existe {partes.path}")
+        # Inscribir (modificar la BD) es solo del admin; analizar/verificar/identificar, de cualquiera
+        if operacion == "inscribir" and not self._exige_admin():
+            return
         consulta = parse_qs(partes.query)
 
         id_persona = None
@@ -447,13 +562,15 @@ class Manejador(BaseHTTPRequestHandler):
                 return self._fallo(HTTPStatus.BAD_REQUEST, "caja_invalida", "caja debe ser x,y,ancho,alto")
         if not foto:
             return self._fallo(HTTPStatus.BAD_REQUEST, "imagen_invalida", "No se ha recibido ninguna foto")
-        self._json(self.app.operar(operacion, id_persona, foto, region))
+        self._json(self.app.operar(operacion, id_persona, foto, region, admin=self._es_admin()))
 
     def do_DELETE(self) -> None:
         if not self._host_valido():
             return self._fallo(HTTPStatus.FORBIDDEN, "host_no_permitido", "Solo se admite localhost")
         if self.headers.get("X-JumeX-Lens") != "1":
             return self._fallo(HTTPStatus.FORBIDDEN, "cabecera_requerida", "Falta la cabecera X-JumeX-Lens")
+        if not self._exige_admin():  # borrar de la BD es solo del admin
+            return
         ruta = urlsplit(self.path).path
         try:
             if ruta == "/api/personas":
@@ -466,8 +583,8 @@ class Manejador(BaseHTTPRequestHandler):
 
 
 def crear_servidor(ruta_config: Path, host: str = "127.0.0.1", puerto: int = 8000,
-                   dominios_extra: tuple[str, ...] = ()) -> ThreadingHTTPServer:
-    app = Aplicacion(ruta_config)
+                   dominios_extra: tuple[str, ...] = (), admin_pass: str | None = None) -> ThreadingHTTPServer:
+    app = Aplicacion(ruta_config, admin_pass=admin_pass)
     manejador = type("ManejadorLens", (Manejador,), {"app": app, "dominios_extra": tuple(dominios_extra)})
     servidor = ThreadingHTTPServer((host, puerto), manejador)
     servidor.daemon_threads = True
@@ -481,6 +598,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-abrir", action="store_true", help="no abrir el navegador")
     parser.add_argument("--tunel", action="store_true",
                         help="publica la web con un túnel de Cloudflare (necesita cloudflared)")
+    parser.add_argument("--admin-pass", default=None,
+                        help=f"PIN de administrador (si no, {VARIABLE_ADMIN} o uno aleatorio que se imprime)")
     args = parser.parse_args(argv)
 
     if args.tunel and shutil.which("cloudflared") is None:
@@ -488,7 +607,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         servidor = crear_servidor(args.config, "127.0.0.1", args.puerto,
-                                  (DOMINIO_TUNEL,) if args.tunel else ())
+                                  (DOMINIO_TUNEL,) if args.tunel else (), admin_pass=args.admin_pass)
     except ErrorBiometrico as e:
         print(f"Error [{e.codigo}]: {e.mensaje}")
         return 1
@@ -501,6 +620,11 @@ def main(argv: list[str] | None = None) -> int:
     url = f"http://127.0.0.1:{args.puerto}"
     print(f"JumeX Lens en {url}  ·  extractor {estado['extractor']}  ·  "
           f"{estado['personas']} personas en {app.cfg.bd.ruta}")
+    if app.admin_pass_generada:
+        print(f"\n  PIN de administrador (para inscribir, borrar y ver la base de datos): {app.admin_pass}")
+        print(f"  Para fijarlo tú: export {VARIABLE_ADMIN}=tu_pin  (o --admin-pass tu_pin)\n")
+    else:
+        print("  Rol usuario por defecto; el admin entra con su PIN desde la web.")
     if estado["personas"] == 0:
         print("La BD está vacía. Para cargar las 50 personas de LFW:\n"
               f"  python scripts/inscribir_csv.py data/lfw/personas.csv --config {args.config}")

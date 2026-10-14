@@ -11,24 +11,38 @@ corrupto o manipulado (p. ej. un ONNX sustituido en el camino) entre en el siste
 
 import argparse
 import hashlib
+import shutil
 import sys
+import tempfile
 import urllib.request
+import zipfile
 from pathlib import Path
 
 CARPETA_MODELOS = Path(__file__).resolve().parent.parent / "models"
 
-# nombre de fichero -> (URL, SHA256 esperado)
+# nombre de fichero -> (URL, SHA256 esperado del fichero final, fichero dentro del zip o None)
 MODELOS = {
     "face_detection_yunet_2023mar.onnx": (
         "https://github.com/opencv/opencv_zoo/raw/main/models/"
         "face_detection_yunet/face_detection_yunet_2023mar.onnx",
         "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
+        None,
     ),
-    # Extractor de referencia (demo web). Hash = oid del puntero Git LFS de opencv_zoo.
+    # Extractor principal: ArcFace ResNet-50 (WebFace600K) del paquete buffalo_l de
+    # InsightFace. Solo se publica dentro de un zip (~290 MB, con otros 4 modelos
+    # que no se usan): se descarga a un temporal y se extrae solo w600k_r50.onnx.
+    # Licencia de InsightFace: uso no comercial / investigación.
+    "arcface_w600k_r50.onnx": (
+        "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
+        "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43",
+        "w600k_r50.onnx",
+    ),
+    # Extractor de referencia (comparativa). Hash = oid del puntero Git LFS de opencv_zoo.
     "face_recognition_sface_2021dec.onnx": (
         "https://github.com/opencv/opencv_zoo/raw/main/models/"
         "face_recognition_sface/face_recognition_sface_2021dec.onnx",
         "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79",
+        None,
     ),
 }
 
@@ -41,7 +55,12 @@ def sha256(ruta: Path) -> str:
     return h.hexdigest()
 
 
-def descargar(nombre: str, url: str, hash_esperado: str, forzar: bool) -> bool:
+def _extraer_del_zip(zip_ruta: Path, miembro: str, destino: Path) -> None:
+    with zipfile.ZipFile(zip_ruta) as z, z.open(miembro) as origen, destino.open("wb") as salida:
+        shutil.copyfileobj(origen, salida, 1 << 20)
+
+
+def descargar(nombre: str, url: str, hash_esperado: str, miembro: str | None, forzar: bool) -> bool:
     destino = CARPETA_MODELOS / nombre
     if destino.is_file() and not forzar and sha256(destino) == hash_esperado:
         print(f"[ok] {nombre} ya existe y su hash es correcto")
@@ -50,8 +69,15 @@ def descargar(nombre: str, url: str, hash_esperado: str, forzar: bool) -> bool:
     print(f"[..] descargando {nombre}", flush=True)
     temporal = destino.with_suffix(destino.suffix + ".part")
     try:
-        urllib.request.urlretrieve(url, temporal)
-    except OSError as e:
+        if miembro is None:
+            urllib.request.urlretrieve(url, temporal)
+        else:
+            # El zip va a un temporal del sistema (no a models/) y se borra al acabar
+            with tempfile.TemporaryDirectory() as carpeta:
+                zip_ruta = Path(carpeta) / "paquete.zip"
+                urllib.request.urlretrieve(url, zip_ruta)
+                _extraer_del_zip(zip_ruta, miembro, temporal)
+    except (OSError, KeyError, zipfile.BadZipFile) as e:
         print(f"[ERROR] no se pudo descargar {nombre}: {e}", file=sys.stderr)
         temporal.unlink(missing_ok=True)
         return False
@@ -77,7 +103,7 @@ def main() -> int:
     args = parser.parse_args()
 
     CARPETA_MODELOS.mkdir(parents=True, exist_ok=True)
-    ok = all(descargar(n, url, h, args.forzar) for n, (url, h) in MODELOS.items())
+    ok = all([descargar(n, url, h, miembro, args.forzar) for n, (url, h, miembro) in MODELOS.items()])
     return 0 if ok else 1
 
 

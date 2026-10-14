@@ -3,8 +3,9 @@
 # Las rutas relativas se resuelven respecto a la carpeta de ESTE fichero.
 # Se puede usar otro fichero con la variable de entorno BIOMETRIA_CONFIG.
 #
-# OJO: los umbrales son PROVISIONALES. Se calibrarán con scripts/evaluar.py
-# (p. ej. en el punto EER o a un FAR objetivo) cuando tengamos las fotos.
+# Los umbrales están calibrados para ArcFace con scripts/evaluar.py sobre LFW
+# (392 personas, 1173 pares genuinos y 615 432 impostores; EER 0,68 % en 0.158).
+# Si se cambia de extractor HAY QUE RECALIBRARLOS: cada técnica puntúa distinto.
 
 detector:
   modelo: models/face_detection_yunet_2023mar.onnx
@@ -20,11 +21,10 @@ calidad:
   umbral_borrosidad: 50.0   # varianza del Laplaciano mínima sobre la cara alineada
 
 extractor:
-  nombre: lbp             # extractor registrado en biometria/extractores (lbp, y en el futuro arcface/mlbp/lda)
+  nombre: arcface         # extractor registrado en biometria/extractores: arcface (el asignado), sface, lbp
   parametros:             # se pasan tal cual al constructor del extractor
-    radio: 1
-    puntos: 8
-    rejilla: [7, 7]       # [columnas, filas] de celdas, mismo orden que tam_cara
+    modelo: models/arcface_w600k_r50.onnx
+    voltear: true         # suma el vector de la cara volteada (más robusto, el doble de lento)
 
 bd:
   ruta: data/bd.csv
@@ -35,10 +35,25 @@ bd:
   agregacion: max           # cómo combinar varias muestras de una persona: max | media
 
 umbrales:
-  verificacion: 0.5         # puntuación mínima para aceptar en verificar*
-  identificacion: 0.5       # puntuación mínima para no devolver "desconocido"
+  verificacion: 0.35        # mínimo para aceptar en verificar*  (LFW: FAR 0,0005 %, FRR 0,85 %)
+  identificacion: 0.40      # mínimo para no devolver "desconocido" (LFW: FAR 0,0005 %, FRR 1,0 %)
+  # Solo para mostrar (web): por debajo, un candidato "no se parece" y no se lista
+  # entre los más parecidos. Dos desconocidos lo superan en el 0,0018 % de los pares
+  # (y con 392 personas en la BD, el 2.º candidato de un inscrito solo en el 1 % de casos).
+  parecido: 0.30
 
 limites:
   max_bytes_imagen: 10485760   # 10 MiB: fichero de imagen máximo aceptado
   max_pixeles: 25000000        # 25 Mpx: protege frente a "bombas" de descompresión
   max_muestras_por_id: 10      # muestras máximas por persona en la BD
+
+defensa:
+  # Contramedidas frente a ataques (ver THREAT_MODEL.md). Se pueden poner a 0 para
+  # medir el sistema sin ellas o para no romper la interoperabilidad del enunciado.
+  coherencia_muestra: 0.20   # al AÑADIR una muestra a alguien que ya existe, debe
+                             # parecerse a las suyas (LFW: rechaza 1,1 % de muestras
+                             # legítimas, bloquea 99,9 % de caras ajenas). 0 = desactivado.
+  # Contra el ajuste automático de un template por los métodos _t (hill-climbing):
+  decimales_puntuacion_t: 2  # la puntuación que sale por _t se redondea a 2 decimales
+  max_intentos_t: 50         # máx. comparaciones _t por id en la ventana (0 = sin límite)
+  ventana_intentos_s: 60     # ventana del límite anterior, en segundos

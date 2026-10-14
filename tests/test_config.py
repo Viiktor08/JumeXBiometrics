@@ -38,3 +38,21 @@ def test_tipo_incorrecto(tmp_path):
 def test_fichero_inexistente(tmp_path):
     with pytest.raises(ConfiguracionInvalida, match="No existe"):
         cargar_config(tmp_path / "no_existe.yaml")
+
+
+def test_config_por_defecto_usa_arcface():
+    cfg = cargar_config()
+    assert cfg.extractor.nombre == "arcface"
+    assert cfg.umbrales.parecido <= min(cfg.umbrales.verificacion, cfg.umbrales.identificacion)
+    # La demo web usa el mismo extractor y los mismos umbrales
+    lens = cargar_config(RAIZ_REPO / "config_lens.yaml")
+    assert lens.extractor.nombre == "arcface" and lens.umbrales == cfg.umbrales
+
+
+@pytest.mark.parametrize("parecido", [-0.1, 0.9])
+def test_umbral_de_parecido_fuera_de_rango(tmp_path, parecido):
+    ruta = tmp_path / "c.yaml"
+    ruta.write_text(f"umbrales:\n  verificacion: 0.35\n  identificacion: 0.4\n  parecido: {parecido}\n",
+                    encoding="utf-8")
+    with pytest.raises(ConfiguracionInvalida, match="parecido"):
+        cargar_config(ruta)

@@ -8,8 +8,8 @@ Pasa cada foto por el pipeline completo (detector -> calidad -> alineado ->
 extractor) y muestra la similitud en [0, 1] (1 = idénticas) entre cada par.
 Sirve para probar el extractor a mano antes de tener la base de datos.
 
-OJO: el umbral de config.yaml (umbrales.verificacion) es provisional: con el
-LBP, personas distintas también puntúan alto (~0.68 de media en LFW, ver README).
+Con ArcFace (config.yaml), la misma persona suele dar 0.4–0.9 y personas
+distintas cerca de 0 (umbral de verificación 0.35; ver "Cuánto acierta" en el README).
 """
 
 import argparse

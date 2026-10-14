@@ -40,3 +40,18 @@ tests/.cache/
 .DS_Store
 .idea/
 .vscode/
+
+# --- Datos de personas reales: NUNCA al repositorio (datos biométricos) ---
+Dataset/
+Dataset */
+Dataset*.tar.gz
+*.tar.gz
+*.tgz
+*.zip
+data/*_respaldo*/
+data/*respaldo*
+
+# --- Claves y secretos ---
+*.pem
+*.sig
+.env*

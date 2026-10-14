@@ -108,14 +108,18 @@ def _crear_parser() -> argparse.ArgumentParser:
         p.add_argument("--foto", required=True, type=Path)
 
     ayuda_t = "sin detector ni extractor: recibe un template"
+    ayuda_firma = "firma HMAC del template (por defecto <template>.sig si existe)"
     p = sub.add_parser("inscribir_t", help=f"inscribe a una persona ({ayuda_t})")
     p.add_argument("--id", required=True)
     p.add_argument("--template", required=True, type=Path)
+    p.add_argument("--firma", default=None, help=ayuda_firma)
     p = sub.add_parser("verificar_t", help=f"verificación 1:1 ({ayuda_t})")
     p.add_argument("--id", required=True)
     p.add_argument("--template", required=True, type=Path)
+    p.add_argument("--firma", default=None, help=ayuda_firma)
     p = sub.add_parser("identificar_t", help=f"identificación 1:N ({ayuda_t})")
     p.add_argument("--template", required=True, type=Path)
+    p.add_argument("--firma", default=None, help=ayuda_firma)
 
     p = sub.add_parser("extraer", help="guarda el template de una foto (.npy, .json o texto)")
     p.add_argument("--foto", required=True, type=Path)
@@ -140,7 +144,12 @@ def ejecutar(args: argparse.Namespace) -> dict:
     if comando == "extraer":
         template = sistema.extraer_sd(args.foto) if args.sin_detector else sistema.extraer(args.foto)
         guardar_template(template, args.salida)
-        return {"operacion": "extraer", "salida": str(args.salida), "dimension": int(template.size)}
+        # Firma HMAC junto al template (<salida>.sig): permite a los _t saber que lo
+        # generó este sistema y no un atacante. Ver THREAT_MODEL.md (paso 2).
+        ruta_firma = args.salida.with_name(args.salida.name + ".sig")
+        ruta_firma.write_text(sistema.firmar(template), encoding="ascii")
+        return {"operacion": "extraer", "salida": str(args.salida), "firma": str(ruta_firma),
+                "dimension": int(template.size)}
     if comando == "bd":
         agrupadas = sistema.bd.por_id()
         return {"operacion": "bd", "integridad": "ok", "ruta": str(sistema.bd.ruta),
@@ -150,12 +159,19 @@ def ejecutar(args: argparse.Namespace) -> dict:
     metodo = getattr(sistema, comando)
     if comando.endswith("_t"):
         dato = cargar_template(args.template)
+        # Firma: la que se pase con --firma, o un fichero <template>.sig al lado
+        firma = args.firma
+        if firma is None:
+            lado = args.template.with_name(args.template.name + ".sig")
+            firma = lado.read_text(encoding="ascii").strip() if lado.is_file() else None
+        if comando.startswith("identificar"):
+            resultado = metodo(dato, firma)
+        else:
+            resultado = metodo(args.id, dato, firma)
+    elif comando.startswith("identificar"):
+        resultado = metodo(args.foto)
     else:
-        dato = args.foto
-    if comando.startswith("identificar"):
-        resultado = metodo(dato)
-    else:
-        resultado = metodo(args.id, dato)
+        resultado = metodo(args.id, args.foto)
     return {**resultado.a_dict(), "operacion": comando}
 
 

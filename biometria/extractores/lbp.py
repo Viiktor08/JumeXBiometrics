@@ -1,7 +1,8 @@
-"""Extractor LBP (Local Binary Patterns) uniforme por rejilla. PROVISIONAL.
+"""Extractor LBP (Local Binary Patterns) uniforme por rejilla. LÍNEA BASE.
 
 Es el extractor clásico de Ahonen et al. (2006), "Face Description with Local
-Binary Patterns". Se usa mientras no tengamos asignada la técnica definitiva.
+Binary Patterns". Fue el extractor provisional antes de tener asignada la
+técnica (ArcFace); se conserva como línea base clásica para comparar.
 
     cara BGR ──► gris ──► código LBP por píxel ──► patrones uniformes (P·(P-1)+3 clases)
              ──► rejilla de celdas ──► histograma normalizado por celda ──► concatenar

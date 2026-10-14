@@ -16,11 +16,13 @@ from __future__ import annotations
 
 from biometria.config import Config
 from biometria.errores import ConfiguracionInvalida
+from biometria.extractores.arcface import ExtractorArcFace
 from biometria.extractores.base import Extractor
 from biometria.extractores.lbp import ExtractorLBP
 from biometria.extractores.sface import ExtractorSFace
 
 EXTRACTORES: dict[str, type[Extractor]] = {
+    ExtractorArcFace.nombre: ExtractorArcFace,
     ExtractorLBP.nombre: ExtractorLBP,
     ExtractorSFace.nombre: ExtractorSFace,
 }
@@ -41,4 +43,5 @@ def crear_extractor(cfg: Config) -> Extractor:
     return extractor
 
 
-__all__ = ["EXTRACTORES", "Extractor", "ExtractorLBP", "ExtractorSFace", "crear_extractor"]
+__all__ = ["EXTRACTORES", "Extractor", "ExtractorArcFace", "ExtractorLBP", "ExtractorSFace",
+           "crear_extractor"]

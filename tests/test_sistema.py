@@ -111,7 +111,11 @@ def test_umbral_de_verificacion(cfg_tmp, ruta_astronauta, ruido):
 
 @pytest.mark.parametrize("agregacion", ["max", "media"])
 def test_agregacion_de_muestras(cfg_tmp, cara_astronauta, ruido, agregacion):
-    sistema = SistemaBiometrico(cfg_con(cfg_tmp, bd={"agregacion": agregacion}))
+    # Mezclar a propósito cara + ruido bajo un id es lo que la coherencia bloquea;
+    # aquí se prueba la AGREGACIÓN, así que se desactiva esa defensa.
+    # Sin redondeo de la puntuación (defensa anti hill-climbing) para comparar el valor exacto
+    sistema = SistemaBiometrico(cfg_con(cfg_tmp, bd={"agregacion": agregacion},
+                                        defensa={"coherencia_muestra": 0.0, "decimales_puntuacion_t": 0}))
     sistema.inscribir_sd("P", cara_astronauta)
     sistema.inscribir_sd("P", ruido)
     t = sistema.extraer_sd(cara_astronauta)
@@ -145,10 +149,14 @@ def test_metodos_t(sistema, ruta_astronauta):
 def test_t_coincide_con_el_pipeline_completo(sistema, ruta_astronauta):
     sistema.inscribir("Eileen", ruta_astronauta)
     t = sistema.extraer(ruta_astronauta)
-    assert sistema.verificar_t("Eileen", t) == sistema.verificar("Eileen", ruta_astronauta)
+    por_t = sistema.verificar_t("Eileen", t)
+    por_foto = sistema.verificar("Eileen", ruta_astronauta)
+    # Misma decisión e id; la puntuación de _t va redondeada (defensa anti hill-climbing)
+    assert por_t.id == por_foto.id and por_t.aceptado == por_foto.aceptado
+    assert por_t.puntuacion == pytest.approx(por_foto.puntuacion, abs=0.01)
 
 
-@pytest.mark.parametrize("template", [np.ones(10), [float("nan")] * 2891, "texto"])
+@pytest.mark.parametrize("template", [np.ones(10), [float("nan")] * 512, "texto"])
 def test_t_rechaza_templates_invalidos(sistema, ruta_astronauta, template):
     sistema.inscribir("Eileen", ruta_astronauta)
     with pytest.raises(TemplateInvalido):
@@ -201,7 +209,7 @@ def test_cli_flujo_completo(capsys, config_yaml, ruta_astronauta, tmp_path):
 
     plantilla = str(tmp_path / "t.npy")
     codigo, salida = ejecutar(capsys, *c, "extraer", "--foto", foto, "--salida", plantilla)
-    assert codigo == 0 and salida["dimension"] == 2891
+    assert codigo == 0 and salida["dimension"] == 512  # ArcFace
     codigo, salida = ejecutar(capsys, *c, "verificar_t", "--id", "Eileen", "--template", plantilla)
     assert salida["operacion"] == "verificar_t" and salida["aceptado"] is True
 

@@ -1,4 +1,4 @@
-"""Extractor SFace (red neuronal de OpenCV Zoo). REFERENCIA, no la técnica asignada.
+"""Extractor SFace (red neuronal de OpenCV Zoo). Para COMPARAR con ArcFace (el asignado).
 
 SFace (Zhong et al., 2021, "SFace: Sigmoid-Constrained Hypersphere Loss for
 Robust Face Recognition") es una red tipo MobileFaceNet que convierte una cara
@@ -6,8 +6,9 @@ alineada de 112x112 en un vector de 128 valores. Viene con OpenCV
 (`cv2.FaceRecognizerSF`) y se alinea con la misma plantilla de ArcFace que usa
 nuestro detector, así que recibe directamente la cara de `Detector.procesar`.
 
-Sirve como referencia fuerte frente al LBP provisional (y para la demo web)
-mientras no tengamos asignada la técnica definitiva.
+Fue la referencia (y el extractor de la demo web) antes de tener asignada la
+técnica, ArcFace. Se conserva para comparar: con la escala (c + 1) / 2, dos
+desconocidos puntúan ~0.54 de media, frente a ~0.03 con ArcFace.
 
     cara BGR 112x112 ──► SFace ──► vector 128 ──► normalizar (norma 1) ──► template
 

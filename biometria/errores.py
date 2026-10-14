@@ -77,6 +77,26 @@ class LimiteMuestras(ErrorBiometrico):
     codigo = "limite_muestras"
 
 
+class MuestraIncoherente(ErrorBiometrico):
+    """La muestra nueva no se parece a las que ya tiene esa persona.
+
+    Defiende la inscripción de un envenenamiento: añadir la cara de un atacante
+    como muestra de la víctima para que luego pase por ella.
+    """
+
+    codigo = "muestra_incoherente"
+
+
+class DemasiadosIntentos(ErrorBiometrico):
+    """Se ha superado el límite de comparaciones por template (_t) en poco tiempo.
+
+    Frena el hill-climbing: ajustar un template probándolo muchas veces hasta
+    superar el umbral, usando la puntuación como guía.
+    """
+
+    codigo = "demasiados_intentos"
+
+
 # --- Base de datos ---------------------------------------------------------
 
 class BDCorrupta(ErrorBiometrico):

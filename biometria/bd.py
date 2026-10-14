@@ -153,17 +153,43 @@ class BaseDatos:
             )
         return texto.encode("utf-8")
 
-    def _obtener_claves(self, crear: bool = False) -> tuple[bytes, bytes]:
-        """(clave HMAC, clave AES) derivadas de la clave maestra."""
+    def _obtener_claves(self, crear: bool = False) -> tuple[bytes, bytes, bytes]:
+        """(clave HMAC de la BD, clave AES, clave de firma de templates) derivadas de la maestra."""
         if self._claves is None:
             maestra = self._clave_maestra(crear)
-            self._claves = (_derivar(maestra, b"hmac"), _derivar(maestra, b"aes-gcm"))
+            self._claves = (_derivar(maestra, b"hmac"), _derivar(maestra, b"aes-gcm"),
+                            _derivar(maestra, b"template-sig"))
         return self._claves
 
     def _hmac(self, indice: int, total: int, id_persona: str, campo: str) -> str:
         mensaje = _mensaje(VERSION, str(indice).encode(), str(total).encode(),
                            id_persona.encode("utf-8"), campo.encode("ascii"))
         return hmac.new(self._obtener_claves()[0], mensaje, hashlib.sha256).hexdigest()
+
+    # ------------------------------------------------------------------ #
+    # Firma de templates (defensa contra templates fabricados en _t)
+    # ------------------------------------------------------------------ #
+    def firmar_template(self, template: np.ndarray) -> str:
+        """HMAC-SHA256 (hex) del template que ESTE sistema ha generado.
+
+        Sirve para que los métodos _t puedan distinguir un template nuestro de uno
+        fabricado a mano por un atacante. La clave sale de la misma clave maestra,
+        así que la firma solo la puede producir quien tiene la clave. Ver THREAT_MODEL.md.
+        """
+        datos = np.asarray(template, dtype="<f4").tobytes()
+        mensaje = _mensaje(VERSION, b"template", datos)
+        # crear=True: si es la primera operación del sistema, se crea la clave como al inscribir
+        return hmac.new(self._obtener_claves(crear=True)[2], mensaje, hashlib.sha256).hexdigest()
+
+    def template_firmado(self, template: np.ndarray, firma: str | None) -> bool:
+        """True si `firma` es una firma válida de `template` hecha por este sistema."""
+        if not firma or not isinstance(firma, str) or not firma.isascii():
+            return False
+        try:
+            esperada = self.firmar_template(template)
+        except ConfiguracionInvalida:
+            return False
+        return hmac.compare_digest(firma, esperada)
 
     # ------------------------------------------------------------------ #
     # Serialización de templates
