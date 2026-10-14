@@ -117,6 +117,36 @@ contenedor) y la cámara tampoco se ve desde Docker en macOS. *El Dockerfile se
 escribió con cuidado pero no se ha podido construir en la máquina de desarrollo
 (no tenía Docker instalado): conviene probarlo.*
 
+### Para el equipo: clonar y empezar
+
+```bash
+git clone -b FINAL https://github.com/Viiktor08/JumeXBiometrics.git
+cd JumeXBiometrics
+python3 -m venv ~/.venvs/jumex && source ~/.venvs/jumex/bin/activate
+pip install -r requirements-dev.txt
+python scripts/descargar_modelos.py          # ~290 MB la primera vez (ArcFace); verifica SHA256
+pytest -q                                    # 200 tests
+```
+
+- El repositorio es **privado**: hay que tener acceso (Settings → Collaborators).
+- **No clones dentro de OneDrive, Dropbox o iCloud.** Esos servicios dejan ficheros
+  de `.git` solo en la nube y git empieza a dar `Operation timed out`. Usa una
+  carpeta normal (p. ej. `~/dev`). El entorno virtual, también fuera.
+- Los **datos no están en el repositorio** (fotos de personas reales, claves,
+  bases de datos y modelos están en el `.gitignore`). El dataset se pasa por un
+  canal privado. Con la carpeta `Dataset/` (fotos `persona_año.jpg`) ya descargada:
+
+```bash
+python scripts/preparar_dataset.py Dataset                          # crea data/dataset_ids.csv
+python scripts/inscribir_csv.py data/dataset_ids.csv --config config_lens.yaml
+python -m biometria.web --admin-pass TU_PIN                         # http://127.0.0.1:8000
+```
+
+- Trabajad en **ramas** (`git switch -c mi-cambio`) y subid con `git push -u origin
+  mi-cambio`; no hagáis `push --force` sobre ramas compartidas.
+- Antes de subir, `git status` no debe mostrar `data/`, `Dataset/`, `models/`,
+  ficheros `.key`, `.csv` ni comprimidos. Si aparece alguno, **no lo añadáis**.
+
 ### Probarlo en 5 minutos
 
 ```bash
