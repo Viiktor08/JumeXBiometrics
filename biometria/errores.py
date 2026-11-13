@@ -97,6 +97,17 @@ class DemasiadosIntentos(ErrorBiometrico):
     codigo = "demasiados_intentos"
 
 
+class TemplateNoFirmado(ErrorBiometrico):
+    """Un método _t ha recibido un template sin una firma válida de este sistema.
+
+    Solo con `defensa.exigir_firma_t: true`. Para el template fabricado a mano, el
+    copiado de la base de datos y el ajustado por hill-climbing: ninguno lleva una
+    firma válida, porque la firma se hace con una clave que el atacante no tiene.
+    """
+
+    codigo = "template_no_firmado"
+
+
 # --- Base de datos ---------------------------------------------------------
 
 class BDCorrupta(ErrorBiometrico):

@@ -152,8 +152,15 @@ def ejecutar(args: argparse.Namespace) -> dict:
                 "dimension": int(template.size)}
     if comando == "bd":
         agrupadas = sistema.bd.por_id()
+        d = sistema.cfg.defensa
         return {"operacion": "bd", "integridad": "ok", "ruta": str(sistema.bd.ruta),
                 "personas": len(agrupadas), "muestras": sum(len(t) for t in agrupadas.values()),
+                "protecciones": {"cifrado": sistema.cfg.bd.cifrar_templates,
+                                 "anti_rollback": sistema.cfg.bd.anti_rollback,
+                                 "clave_junto_a_bd": sistema.bd.clave_junto_a_bd(),
+                                 "exigir_firma_t": d.exigir_firma_t,
+                                 "margen_identificacion": d.margen_identificacion,
+                                 "cara_en_sd": d.cara_en_sd},
                 "ids": {id_persona: len(t) for id_persona, t in sorted(agrupadas.items())}}
 
     metodo = getattr(sistema, comando)

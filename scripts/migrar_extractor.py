@@ -124,7 +124,8 @@ def main() -> int:
             cara = cara_del_retrato(sistema, retrato)
             if nitidez(cara) <= 0:
                 raise ValueError("cara vacía")
-            sistema.inscribir_t(id_persona, sistema.extractor.extraer(cara))
+            template = sistema.extractor.extraer(cara)
+            sistema.inscribir_t(id_persona, template, firma=sistema.firmar(template))
         except (ErrorBiometrico, ValueError) as e:
             perdidas.append((id_persona, str(e)))
             continue

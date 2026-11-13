@@ -38,7 +38,9 @@ def template_aleatorio(extractor, semilla):
 @pytest.fixture
 def cfg_tmp(cfg, tmp_path, monkeypatch):
     monkeypatch.delenv(VARIABLE_CLAVE, raising=False)
-    return cfg_con(cfg, bd={"ruta": tmp_path / "bd.csv", "ruta_clave": tmp_path / "clave.key"})
+    # Base de estos tests: en claro y sin sello (cada defensa tiene sus propios tests)
+    return cfg_con(cfg, bd={"ruta": tmp_path / "bd.csv", "ruta_clave": tmp_path / "clave.key",
+                            "cifrar_templates": False, "anti_rollback": False})
 
 
 @pytest.fixture
@@ -114,7 +116,8 @@ def test_no_guarda_templates_invalidos(bd, extractor):
 
 def test_escritura_atomica_no_deja_temporales(bd, extractor):
     bd_con_tres_filas(bd, extractor)
-    assert sorted(p.name for p in bd.ruta.parent.iterdir()) == ["bd.csv", "clave.key"]
+    # (.bd.csv.lock es el fichero del bloqueo entre procesos, vacío y permanente)
+    assert sorted(p.name for p in bd.ruta.parent.iterdir()) == [".bd.csv.lock", "bd.csv", "clave.key"]
 
 
 # --- Clave ----------------------------------------------------------------------------

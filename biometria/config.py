@@ -57,6 +57,9 @@ class ConfigBD:
     ruta_clave: Path
     cifrar_templates: bool = False
     agregacion: str = "max"  # "max" | "media"
+    # Sello anti-rollback: hash firmado del último CSV escrito, guardado junto a la
+    # clave (no junto a la BD). Detecta que alguien vuelva a una copia antigua válida.
+    anti_rollback: bool = False
 
 
 @dataclass(frozen=True)
@@ -93,6 +96,15 @@ class ConfigDefensa:
     max_intentos_t: int = 0
     # Ventana (segundos) en la que cuenta ese límite de intentos.
     ventana_intentos_s: float = 60.0
+    # Paso 2 (estricto): los métodos _t RECHAZAN los templates sin una firma válida
+    # de este sistema (los que no salen de `extraer`). False = solo avisan (`fiable`).
+    exigir_firma_t: bool = False
+    # Paso 4 (gemelos/dobles): en identificar, el 1.º candidato debe sacar al 2.º al
+    # menos este margen; si no, el resultado es "desconocido (ambiguo)". 0 = desactivado.
+    margen_identificacion: float = 0.0
+    # Paso 5: los métodos _sd comprueban que la imagen contiene una cara (con YuNet),
+    # aunque no la usen para alinear. Evita meter ruido o imágenes que no son caras.
+    cara_en_sd: bool = False
 
 
 @dataclass(frozen=True)
@@ -117,7 +129,7 @@ def _seccion(datos: dict, nombre: str) -> dict:
 
 def _ruta(valor: str, base: Path) -> Path:
     """Resuelve una ruta relativa respecto a la carpeta del fichero de config."""
-    ruta = Path(valor)
+    ruta = Path(valor).expanduser()  # "~/.jumex/clave.key" -> carpeta del usuario
     return ruta if ruta.is_absolute() else (base / ruta).resolve()
 
 
@@ -155,6 +167,7 @@ def _construir(datos: dict, base: Path) -> Config:
                 ruta_clave=_ruta(bd.get("ruta_clave", "data/clave_hmac.key"), base),
                 cifrar_templates=bool(bd.get("cifrar_templates", False)),
                 agregacion=str(bd.get("agregacion", "max")),
+                anti_rollback=bool(bd.get("anti_rollback", False)),
             ),
             umbrales=ConfigUmbrales(
                 verificacion=float(umb.get("verificacion", 0.5)),
@@ -171,6 +184,9 @@ def _construir(datos: dict, base: Path) -> Config:
                 decimales_puntuacion_t=int(defe.get("decimales_puntuacion_t", 0)),
                 max_intentos_t=int(defe.get("max_intentos_t", 0)),
                 ventana_intentos_s=float(defe.get("ventana_intentos_s", 60.0)),
+                exigir_firma_t=bool(defe.get("exigir_firma_t", False)),
+                margen_identificacion=float(defe.get("margen_identificacion", 0.0)),
+                cara_en_sd=bool(defe.get("cara_en_sd", False)),
             ),
         )
     except (TypeError, ValueError) as e:
@@ -210,6 +226,8 @@ def _validar(cfg: Config) -> None:
         errores.append("defensa.max_intentos_t no puede ser negativo")
     if cfg.defensa.ventana_intentos_s <= 0:
         errores.append("defensa.ventana_intentos_s debe ser positiva")
+    if not 0.0 <= cfg.defensa.margen_identificacion <= 1.0:
+        errores.append("defensa.margen_identificacion debe estar en [0, 1]")
     if errores:
         raise ConfiguracionInvalida("; ".join(errores))
 

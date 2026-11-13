@@ -33,7 +33,7 @@ import numpy as np
 from biometria.bd import BaseDatos, validar_id
 from biometria.config import Config, cargar_config
 from biometria.detector import Detector
-from biometria.errores import DemasiadosIntentos, IdNoInscrito, MuestraIncoherente
+from biometria.errores import DemasiadosIntentos, IdNoInscrito, MuestraIncoherente, TemplateNoFirmado
 from biometria.extractores import crear_extractor
 from biometria.imagen import OrigenImagen, cargar_imagen
 
@@ -63,10 +63,13 @@ class ResultadoVerificacion:
 
 @dataclass(frozen=True)
 class ResultadoIdentificacion:
-    id: str | None         # None = desconocido (nadie supera el umbral o BD vacía)
+    id: str | None         # None = desconocido (nadie supera el umbral, ambiguo o BD vacía)
     puntuacion: float | None  # la del mejor candidato, lo supere o no
     umbral: float
     fiable: bool | None = None  # como en ResultadoVerificacion
+    # True: el mejor supera el umbral pero el 2.º está a menos de
+    # defensa.margen_identificacion (gemelos, dobles): no se decide por nadie.
+    ambiguo: bool = False
 
     @property
     def identificado(self) -> bool:
@@ -101,6 +104,9 @@ class SistemaBiometrico:
     def extraer_sd(self, foto: OrigenImagen) -> np.ndarray:
         """Foto de una cara ya recortada -> template, sin detector ni alineado."""
         imagen = cargar_imagen(foto, self.cfg.limites)
+        if self.cfg.defensa.cara_en_sd:
+            # Paso 5: aunque no se alinee, la imagen tiene que ser una cara
+            self.detector.comprobar_cara_recortada(imagen)
         return self.extractor.extraer(self.detector.preparar_sin_detector(imagen).cara)
 
     # ------------------------------------------------------------------ #
@@ -115,6 +121,17 @@ class SistemaBiometrico:
         if firma is None:
             return None
         return self.bd.template_firmado(self.extractor.validar_template(template), firma)
+
+    def _exigir_firma(self, template, firma: str | None) -> bool | None:
+        """Como _fiable, pero con `defensa.exigir_firma_t` RECHAZA lo que no está firmado."""
+        fiable = self._fiable(template, firma)
+        if self.cfg.defensa.exigir_firma_t and fiable is not True:
+            motivo = "no trae firma" if firma is None else "la firma no corresponde a este template"
+            raise TemplateNoFirmado(
+                f"Template rechazado: {motivo}. Los métodos _t solo aceptan templates generados por "
+                "este sistema (python -m biometria extraer --foto X --salida t.npy crea t.npy y t.npy.sig)."
+            )
+        return fiable
 
     def _redondear(self, puntuacion: float | None) -> float | None:
         """Recorta decimales de la puntuación que sale por _t, para no guiar un hill-climbing."""
@@ -203,13 +220,18 @@ class SistemaBiometrico:
     def _identificar(self, template, fiable: bool | None = None,
                      redondear: bool = False) -> ResultadoIdentificacion:
         umbral = self.cfg.umbrales.identificacion
-        mejores = self.ranking(template, 1)
+        mejores = self.ranking(template, 2)
         if not mejores:
             return ResultadoIdentificacion(None, None, umbral, fiable)
         mejor_id, mejor = mejores[0]
         identificado = mejor >= umbral  # la decisión usa la puntuación exacta
+        # Paso 4: si el 2.º está casi empatado con el 1.º, no hay forma fiable de
+        # decidir entre los dos (gemelos, dobles, una foto a medio camino): desconocido.
+        margen = self.cfg.defensa.margen_identificacion
+        ambiguo = identificado and margen > 0 and len(mejores) > 1 and mejor - mejores[1][1] < margen
         puntuacion = self._redondear(mejor) if redondear else mejor
-        return ResultadoIdentificacion(mejor_id if identificado else None, puntuacion, umbral, fiable)
+        return ResultadoIdentificacion(mejor_id if identificado and not ambiguo else None,
+                                       puntuacion, umbral, fiable, ambiguo)
 
     def _comprobar_inscrito(self, id_persona: str) -> None:
         """Antes de procesar la foto: no gastar el detector en un id que no existe."""
@@ -241,10 +263,11 @@ class SistemaBiometrico:
     def identificar_sd(self, foto: OrigenImagen) -> ResultadoIdentificacion:
         return self._identificar(self.extraer_sd(foto))
 
+    # Con defensa.exigir_firma_t, los tres _t rechazan (template_no_firmado) lo que no
+    # venga firmado por este sistema: template fabricado, copiado de la BD o ajustado
+    # por hill-climbing. Sin ella, solo avisan con `fiable`. Ver THREAT_MODEL.md, paso 2.
     def inscribir_t(self, id_persona: str, template, firma: str | None = None) -> ResultadoInscripcion:
-        # Firma opcional: inscribir no devuelve puntuación, pero sí registra si el
-        # template es nuestro (quien lo use puede rechazar inscribir templates ajenos).
-        self._fiable(template, firma)
+        self._exigir_firma(template, firma)
         return self._inscribir(id_persona, template)
 
     def verificar_t(self, id_persona: str, template, firma: str | None = None,
@@ -253,12 +276,12 @@ class SistemaBiometrico:
         # procesar (la web): ahí no hay hill-climbing, no gasta el cupo de intentos.
         if _contar:
             self._contar_intento(validar_id(id_persona))  # límite anti hill-climbing por id
-        fiable = self._fiable(template, firma)
+        fiable = self._exigir_firma(template, firma)
         return self._verificar(id_persona, template, fiable=fiable, redondear=True)
 
     def identificar_t(self, template, firma: str | None = None,
                       _contar: bool = True) -> ResultadoIdentificacion:
         if _contar:
             self._contar_intento("__identificar__")  # el 1:N no tiene id: un único cupo
-        fiable = self._fiable(template, firma)
+        fiable = self._exigir_firma(template, firma)
         return self._identificar(template, fiable=fiable, redondear=True)

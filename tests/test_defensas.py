@@ -5,12 +5,16 @@ Cada test monta una BD temporal, lanza el ataque como lo haría el grupo rival
 legítimo. Necesitan los modelos y, la primera vez, la foto de prueba.
 """
 
+import json
+import threading
+
 import numpy as np
 import pytest
 
 from biometria.bd import VARIABLE_CLAVE
 from biometria.config import RAIZ_REPO
-from biometria.errores import DemasiadosIntentos, MuestraIncoherente
+from biometria.errores import (DemasiadosIntentos, IntegridadBD, MuestraIncoherente, SinCara,
+                               TemplateNoFirmado)
 from biometria.extractores.arcface import MODELO_POR_DEFECTO
 from biometria.sistema import SistemaBiometrico
 from tests.conftest import cfg_con
@@ -26,7 +30,7 @@ def cfg_tmp(cfg, tmp_path, monkeypatch, detector):
     monkeypatch.delenv(VARIABLE_CLAVE, raising=False)
     return cfg_con(cfg,
                    bd={"ruta": tmp_path / "bd.csv", "ruta_clave": tmp_path / "k.key"},
-                   defensa={"coherencia_muestra": 0.20})
+                   defensa={"coherencia_muestra": 0.20, "exigir_firma_t": False})
 
 
 # --- Paso 1: envenenar la inscripción ---------------------------------------
@@ -63,7 +67,7 @@ def test_coherencia_desactivada_deja_pasar_el_ataque(cfg, tmp_path, monkeypatch,
     que la defensa es la que lo para, no otra cosa)."""
     monkeypatch.delenv(VARIABLE_CLAVE, raising=False)
     cfg_sin = cfg_con(cfg, bd={"ruta": tmp_path / "bd.csv", "ruta_clave": tmp_path / "k.key"},
-                      defensa={"coherencia_muestra": 0.0})
+                      defensa={"coherencia_muestra": 0.0, "exigir_firma_t": False})
     sistema = SistemaBiometrico(cfg_sin)
     sistema.inscribir("Eileen Collins", ruta_astronauta)
     ajena = sistema.extractor.extraer(
@@ -91,8 +95,11 @@ def test_firma_distingue_template_propio_de_fabricado(cfg_tmp, ruta_astronauta):
 def test_la_firma_depende_de_la_clave(cfg, tmp_path, monkeypatch, detector, ruta_astronauta):
     """Un template firmado por OTRO sistema (otra clave) no se acepta como fiable."""
     monkeypatch.delenv(VARIABLE_CLAVE, raising=False)
-    a = SistemaBiometrico(cfg_con(cfg, bd={"ruta": tmp_path / "a.csv", "ruta_clave": tmp_path / "a.key"}))
-    b = SistemaBiometrico(cfg_con(cfg, bd={"ruta": tmp_path / "b.csv", "ruta_clave": tmp_path / "b.key"}))
+    sin_estricto = {"exigir_firma_t": False}  # aquí se mira `fiable`, no el rechazo
+    a = SistemaBiometrico(cfg_con(cfg, bd={"ruta": tmp_path / "a.csv", "ruta_clave": tmp_path / "a.key"},
+                                  defensa=sin_estricto))
+    b = SistemaBiometrico(cfg_con(cfg, bd={"ruta": tmp_path / "b.csv", "ruta_clave": tmp_path / "b.key"},
+                                  defensa=sin_estricto))
     a.inscribir("Eileen", ruta_astronauta)
     b.inscribir("Eileen", ruta_astronauta)
     t = a.extraer(ruta_astronauta)
@@ -132,3 +139,175 @@ def test_las_operaciones_con_foto_no_gastan_el_cupo(cfg_tmp, ruta_astronauta):
     for _ in range(10):
         sistema.verificar("Eileen", ruta_astronauta)  # nunca se frena
     assert sistema.identificar(ruta_astronauta).id == "Eileen"
+
+
+# --- Paso 2 (estricto): los _t rechazan lo que no está firmado ----------------
+
+def _vector(semilla: int) -> np.ndarray:
+    v = np.random.default_rng(semilla).standard_normal(512).astype(np.float32)
+    return v / np.linalg.norm(v)
+
+
+@pytest.fixture
+def estricto(cfg_tmp):
+    return SistemaBiometrico(cfg_con(cfg_tmp, defensa={"exigir_firma_t": True}))
+
+
+def test_estricto_rechaza_template_sin_firma_o_con_firma_falsa(estricto, ruta_astronauta):
+    estricto.inscribir("Eileen", ruta_astronauta)
+    fabricado = _vector(1)
+    for llamada in (lambda f: estricto.verificar_t("Eileen", fabricado, f),
+                    lambda f: estricto.identificar_t(fabricado, f),
+                    lambda f: estricto.inscribir_t("Otro", fabricado, f)):
+        for firma in (None, "ab" * 32, "no-hex"):
+            with pytest.raises(TemplateNoFirmado):
+                llamada(firma)
+
+
+def test_estricto_acepta_los_templates_propios(estricto, ruta_astronauta):
+    estricto.inscribir("Eileen", ruta_astronauta)
+    t = estricto.extraer(ruta_astronauta)
+    firma = estricto.firmar(t)
+    r = estricto.verificar_t("Eileen", t, firma)
+    assert r.aceptado and r.fiable is True
+    assert estricto.identificar_t(t, firma).id == "Eileen"
+
+
+def test_estricto_rechaza_el_template_copiado_de_la_bd(estricto, ruta_astronauta):
+    """Quien LEE la BD saca el template de la víctima, pero no su firma."""
+    estricto.inscribir("Eileen", ruta_astronauta)
+    copiado = estricto.bd.templates_de("Eileen")[0]
+    with pytest.raises(TemplateNoFirmado):
+        estricto.verificar_t("Eileen", copiado)
+
+
+def test_estricto_rechaza_un_template_firmado_y_retocado(estricto, ruta_astronauta):
+    """Hill-climbing: cada variación del template pierde la firma del original."""
+    estricto.inscribir("Eileen", ruta_astronauta)
+    t = estricto.extraer(ruta_astronauta)
+    firma = estricto.firmar(t)
+    retocado = t.copy()
+    retocado[0] += 1e-3
+    retocado /= np.linalg.norm(retocado)
+    with pytest.raises(TemplateNoFirmado):
+        estricto.verificar_t("Eileen", retocado, firma)
+
+
+# --- Paso 4: margen entre el 1.º y el 2.º (gemelos / dobles) ------------------
+
+def test_margen_marca_ambiguo_un_empate_entre_dos_personas(cfg_tmp):
+    a, b = _vector(10), _vector(11)
+    medio = (a + b) / np.linalg.norm(a + b)  # igual de parecido a los dos (~0,71)
+    for margen, esperado in ((0.10, {None}), (0.0, {"A", "B"})):  # sin margen, decide uno al azar
+        cfg = cfg_con(cfg_tmp, bd={"ruta": cfg_tmp.bd.ruta.with_name(f"m{margen}.csv")},
+                      defensa={"margen_identificacion": margen, "exigir_firma_t": False})
+        sistema = SistemaBiometrico(cfg)
+        sistema.inscribir_t("A", a)
+        sistema.inscribir_t("B", b)
+        r = sistema.identificar_t(medio, _contar=False)
+        assert r.id in esperado and r.ambiguo is (margen > 0)
+        assert sistema.identificar_t(a, _contar=False).id == "A"  # sin empate, decide
+
+
+# --- Paso 5: los _sd exigen que la imagen sea una cara ------------------------
+
+def test_sd_rechaza_lo_que_no_es_una_cara(cfg_tmp, astronauta):
+    sistema = SistemaBiometrico(cfg_con(cfg_tmp, defensa={"cara_en_sd": True}))
+    ruido = np.random.default_rng(0).integers(0, 256, (112, 112, 3), dtype=np.uint8)
+    liso = np.full((112, 112, 3), 90, dtype=np.uint8)
+    for imagen in (ruido, liso):
+        with pytest.raises(SinCara):
+            sistema.inscribir_sd("Nadie", imagen)
+    # Un recorte de cara de verdad sí entra
+    caja = sistema.detector.detectar(astronauta)[0].caja
+    x, y, w, h = caja
+    assert sistema.inscribir_sd("Eileen", astronauta[y:y + h, x:x + w]).muestras == 1
+
+
+# --- Paso 6: clave aparte, cifrado, sello anti-rollback y bloqueo --------------
+
+@pytest.fixture
+def cfg_sello(cfg_tmp, tmp_path):
+    """BD en tmp/datos y la clave (con el sello) en otra carpeta, como en config.yaml."""
+    return cfg_con(cfg_tmp, bd={"ruta": tmp_path / "datos" / "bd.csv",
+                                "ruta_clave": tmp_path / "secreto" / "clave.key",
+                                "cifrar_templates": True, "anti_rollback": True},
+                   defensa={"exigir_firma_t": False})
+
+
+def test_rollback_a_una_copia_antigua_se_detecta(cfg_sello):
+    sistema = SistemaBiometrico(cfg_sello)
+    sistema.inscribir_t("A", _vector(1))
+    copia = sistema.bd.ruta.read_bytes()           # el atacante guarda esta versión
+    sistema.inscribir_t("B", _vector(2))
+    sistema.bd.eliminar("A")                       # el admin borra a A...
+    sistema.bd.ruta.write_bytes(copia)             # ...y el atacante restaura la copia
+    with pytest.raises(IntegridadBD, match="rollback"):
+        sistema.bd.ids()
+
+
+def test_borrar_la_bd_entera_se_detecta(cfg_sello):
+    sistema = SistemaBiometrico(cfg_sello)
+    sistema.inscribir_t("A", _vector(1))
+    sistema.bd.ruta.unlink()
+    with pytest.raises(IntegridadBD, match="desaparecido"):
+        sistema.bd.ids()
+
+
+def test_el_sello_manipulado_se_detecta(cfg_sello):
+    sistema = SistemaBiometrico(cfg_sello)
+    sistema.inscribir_t("A", _vector(1))
+    ruta = sistema.bd.ruta_sello()
+    datos = json.loads(ruta.read_text())
+    datos["sha256"] = "0" * 64
+    ruta.write_text(json.dumps(datos))
+    with pytest.raises(IntegridadBD, match="sello"):
+        sistema.bd.ids()
+
+
+def test_lectura_a_mitad_de_escritura_no_da_falso_rollback(cfg_sello):
+    """Sello en dos fases: entre anunciar la versión nueva y confirmarla, un lector
+    acepta tanto la anterior como la nueva."""
+    sistema = SistemaBiometrico(cfg_sello)
+    sistema.inscribir_t("A", _vector(1))
+    bd = sistema.bd
+    anterior = bd.ruta.read_bytes()
+    bd._escribir_sello(bd._resumen(anterior), pendiente="f" * 64)  # escritura en curso
+    assert bd.ids() == ["A"]
+
+
+def test_bd_cifrada_no_deja_leer_los_templates_y_la_clave_va_aparte(cfg_sello):
+    sistema = SistemaBiometrico(cfg_sello)
+    sistema.inscribir_t("A", _vector(1))
+    texto = sistema.bd.ruta.read_text()
+    assert "f32:" not in texto and "gcm:" in texto
+    assert not sistema.bd.clave_junto_a_bd()
+    assert not any(p.suffix == ".key" for p in sistema.bd.ruta.parent.iterdir())
+
+
+def test_recodificar_cifra_una_bd_en_claro(cfg_sello):
+    en_claro = cfg_con(cfg_sello, bd={"cifrar_templates": False})
+    a = SistemaBiometrico(en_claro)
+    a.bd.inscribir("A", _vector(1))  # directo a la BD: sin la coherencia del paso 1
+    a.bd.inscribir("A", _vector(2))
+    antes = a.bd.templates_de("A")
+    b = SistemaBiometrico(cfg_sello)
+    cambios = b.bd.recodificar()
+    assert len(cambios["A"]) == 2 and all(v != k for k, v in cambios["A"].items())
+    assert "f32:" not in b.bd.ruta.read_text()
+    assert all(np.array_equal(x, y) for x, y in zip(antes, b.bd.templates_de("A")))
+
+
+def test_dos_procesos_escribiendo_a_la_vez_no_pierden_muestras(cfg_sello):
+    """Con el bloqueo, leer-modificar-escribir es atómico: no se pisan."""
+    def inscribir(n):
+        sistema = SistemaBiometrico(cfg_sello)  # instancia propia, como otro proceso
+        for i in range(8):
+            sistema.bd.inscribir(f"P{n}-{i}", _vector(100 * n + i))
+    SistemaBiometrico(cfg_sello).bd.inscribir("Inicial", _vector(0))  # crea la clave
+    hilos = [threading.Thread(target=inscribir, args=(n,)) for n in range(4)]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join()
+    assert len(SistemaBiometrico(cfg_sello).bd.ids()) == 1 + 4 * 8

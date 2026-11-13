@@ -56,6 +56,11 @@ LADOS_DETECCION = (MAX_LADO_DETECCION, 640, 320)
 # Dos detecciones de escalas distintas con más solapamiento (IoU) que esto son
 # la misma cara: se queda la de mayor confianza.
 IOU_MISMA_CARA = 0.4
+# Paso 5 (métodos _sd): lado al que se lleva la cara recortada antes de añadirle
+# borde, y confianza mínima para aceptar que "es una cara" (medido en
+# scripts/medir_defensas.py: ver THREAT_MODEL.md).
+LADO_COMPROBACION_SD = 160
+UMBRAL_CARA_SD = 0.5
 
 
 @dataclass(frozen=True)
@@ -221,6 +226,26 @@ class Detector:
         """Pipeline completo: detectar, elegir cara, calidad y alineado."""
         deteccion = self.elegir_cara(self.detectar(imagen))
         return self.procesar_deteccion(imagen, deteccion)
+
+    def comprobar_cara_recortada(self, imagen: np.ndarray) -> Deteccion:
+        """Paso 5 (métodos _sd): comprueba que una imagen YA recortada contiene una cara.
+
+        YuNet no encuentra bien una cara que ocupa toda la imagen, así que antes se
+        añade un borde (la cara queda en la mitad central, como en una foto normal)
+        y se usa una confianza más baja que en el pipeline completo: aquí solo se
+        pregunta "¿esto es una cara?", no se busca la mejor cara para alinear.
+        La detección NO se usa para alinear: el método _sd sigue sin detector.
+        """
+        alto, ancho = imagen.shape[:2]
+        escala = LADO_COMPROBACION_SD / max(alto, ancho)
+        reducida = cv2.resize(imagen, (max(1, round(ancho * escala)), max(1, round(alto * escala))),
+                              interpolation=cv2.INTER_AREA if escala < 1 else cv2.INTER_LINEAR)
+        borde = LADO_COMPROBACION_SD // 2
+        con_borde = cv2.copyMakeBorder(reducida, borde, borde, borde, borde, cv2.BORDER_CONSTANT, value=(127, 127, 127))
+        detecciones = self._detectar_a_escala(con_borde, 1.0, UMBRAL_CARA_SD)
+        if not detecciones:
+            raise SinCara("La imagen no parece una cara (los métodos _sd esperan una cara ya recortada)")
+        return max(detecciones, key=lambda d: d.confianza)
 
     def preparar_sin_detector(self, imagen: np.ndarray) -> CaraProcesada:
         """Preprocesado de los métodos _sd: la imagen se toma como cara ya recortada.

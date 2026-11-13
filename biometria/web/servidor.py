@@ -334,12 +334,14 @@ class Aplicacion:
                 for i, p in self.sistema.ranking(template, n) if p >= minimo]
 
     def _verificar(self, id_persona: str, analisis: Analisis) -> dict:
-        r = self.sistema.verificar_t(id_persona, analisis.template, _contar=False)
+        r = self.sistema.verificar_t(id_persona, analisis.template,
+                                     firma=self.sistema.firmar(analisis.template), _contar=False)
         return {"id": r.id, "aceptado": r.aceptado, "puntuacion": r.puntuacion,
                 "umbral": r.umbral, "foto": self.url_foto(r.id)}
 
     def _identificar(self, _id: None, analisis: Analisis) -> dict:
-        r = self.sistema.identificar_t(analisis.template, _contar=False)
+        r = self.sistema.identificar_t(analisis.template, firma=self.sistema.firmar(analisis.template),
+                                       _contar=False)
         return {"id": r.id, "identificado": r.identificado, "puntuacion": r.puntuacion,
                 "umbral": r.umbral, "parecido": self.cfg.umbrales.parecido,
                 "foto": self.url_foto(r.id) if r.id else None,
@@ -367,7 +369,8 @@ class Aplicacion:
                 item.update(estado="descartada", error=cara.error.a_dict())
             else:
                 # Misma regla que identificar_t: el mejor candidato, si supera el umbral
-                r = self.sistema.identificar_t(cara.template, _contar=False)
+                r = self.sistema.identificar_t(cara.template, firma=self.sistema.firmar(cara.template),
+                                               _contar=False)
                 item.update(estado="identificada" if r.identificado else "desconocida",
                             id=r.id, puntuacion=r.puntuacion,
                             foto=self.url_foto(r.id) if r.id else None,
@@ -393,7 +396,7 @@ class Aplicacion:
         return respuesta
 
     def _inscribir(self, id_persona: str, analisis: Analisis) -> dict:
-        r = self.sistema.inscribir_t(id_persona, analisis.template)
+        r = self.sistema.inscribir_t(id_persona, analisis.template, firma=self.sistema.firmar(analisis.template))
         clave = self.sistema.bd.muestras_de(r.id)[-1][0]  # la recién añadida va al final
         self.galeria.guardar_muestra_de_analisis(r.id, clave, analisis)
         return {"id": r.id, "muestras": r.muestras, "nueva_persona": r.muestras == 1,

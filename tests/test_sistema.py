@@ -1,5 +1,6 @@
 """Tests de SistemaBiometrico (los 9 métodos) y de la CLI."""
 
+import re
 import json
 from pathlib import Path
 
@@ -24,7 +25,10 @@ import cv2  # noqa: I001
 @pytest.fixture
 def cfg_tmp(cfg, tmp_path, monkeypatch, detector):
     monkeypatch.delenv(VARIABLE_CLAVE, raising=False)
-    return cfg_con(cfg, bd={"ruta": tmp_path / "bd.csv", "ruta_clave": tmp_path / "clave.key"})
+    # Comportamiento base de los 9 métodos: sin las defensas que lo cambian a
+    # propósito (cada una tiene sus tests en test_defensas.py)
+    return cfg_con(cfg, bd={"ruta": tmp_path / "bd.csv", "ruta_clave": tmp_path / "clave.key"},
+                   defensa={"exigir_firma_t": False, "cara_en_sd": False, "margen_identificacion": 0.0})
 
 
 @pytest.fixture
@@ -184,7 +188,8 @@ def config_yaml(cfg_tmp, tmp_path):
     raiz = Path(__file__).resolve().parent.parent
     texto = (raiz / "config.yaml").read_text(encoding="utf-8")
     texto = texto.replace("ruta: data/bd.csv", f"ruta: {cfg_tmp.bd.ruta}")
-    texto = texto.replace("ruta_clave: data/clave_hmac.key", f"ruta_clave: {cfg_tmp.bd.ruta_clave}")
+    re_clave = f"ruta_clave: {cfg_tmp.bd.ruta_clave}"
+    texto = re.sub(r"ruta_clave: \S+", lambda _: re_clave, texto)
     texto = texto.replace("modelo: models/", f"modelo: {raiz / 'models'}/")
     ruta.write_text(texto, encoding="utf-8")
     return str(ruta)
@@ -228,8 +233,10 @@ def test_cli_verificacion_rechazada_sale_con_0(capsys, config_yaml, ruta_astrona
     ruta_ruido = tmp_path / "ruido.png"
     cv2.imwrite(str(ruta_ruido), ruido)
     c = ["--config", config_yaml]
+    # Sin la comprobación de cara en _sd (paso 5): aquí interesa una muestra lejana cualquiera
+    Path(config_yaml).write_text(Path(config_yaml).read_text().replace("cara_en_sd: true", "cara_en_sd: false"))
     ejecutar(capsys, *c, "inscribir_sd", "--id", "Ruido", "--foto", str(ruta_ruido))
-    texto = Path(config_yaml).read_text().replace("verificacion: 0.5", "verificacion: 0.99")
+    texto = re.sub(r"verificacion: [0-9.]+", "verificacion: 0.99", Path(config_yaml).read_text())
     Path(config_yaml).write_text(texto)
     codigo, salida = ejecutar(capsys, *c, "verificar", "--id", "Ruido", "--foto", str(ruta_astronauta))
     assert codigo == 0 and salida["aceptado"] is False

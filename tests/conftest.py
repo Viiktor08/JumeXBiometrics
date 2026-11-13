@@ -43,6 +43,13 @@ def _descargar_verificado(url: str, destino: Path, sha256: str) -> Path:
     return destino
 
 
+@pytest.fixture(autouse=True)
+def home_temporal(tmp_path_factory, monkeypatch):
+    """Ningún test toca la carpeta del usuario: `~` (p. ej. ~/.jumex/clave.key de la
+    config) apunta a una carpeta temporal."""
+    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
+
+
 @pytest.fixture(scope="session")
 def cfg():
     return cargar_config()

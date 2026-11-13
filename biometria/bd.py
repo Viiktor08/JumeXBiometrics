@@ -22,19 +22,28 @@ Clave: variable de entorno BIOMETRIA_HMAC_KEY o, si no existe, el fichero
 vez). De ella se derivan con HKDF dos claves independientes: una para el HMAC y
 otra para el cifrado.
 
-Lo que NO detecta (va en THREAT_MODEL.md): volver a una copia antigua completa
-y válida del CSV (rollback) y borrar el fichero entero (equivale a una BD vacía:
-denegación de servicio, pero no permite suplantar a nadie).
+Rollback (con `bd.anti_rollback: true`): tras cada escritura se guarda un
+**sello** (SHA-256 del CSV, firmado con HMAC) en la carpeta de la CLAVE, no en la
+de la BD. Al leer, el CSV debe coincidir con el sello: volver a una copia antigua
+completa y válida, o borrar el fichero, se detecta. Sin sello previo (primera
+vez) se confía en el CSV actual y se sella.
+
+Concurrencia: las escrituras (leer, modificar, reescribir) se hacen con un
+bloqueo de fichero (`flock`), así dos procesos que inscriben a la vez no se
+pisan y ninguna muestra se pierde. En Windows no hay `fcntl`: el bloqueo no se
+aplica (la escritura sigue siendo atómica).
 """
 
 from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import csv
 import hashlib
 import hmac
 import io
+import json
 import os
 import re
 import secrets
@@ -63,6 +72,11 @@ from biometria.errores import (
     TemplateInvalido,
 )
 from biometria.extractores import Extractor
+
+try:  # bloqueo entre procesos (macOS/Linux)
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
 
 CABECERA = ["id", "template", "hmac"]
 VERSION = b"jumex-bd-v1"
@@ -116,6 +130,20 @@ def _mensaje(*partes: bytes) -> bytes:
     return b"".join(struct.pack(">Q", len(p)) + p for p in partes)
 
 
+def _escribir_atomico(ruta: Path, datos: bytes) -> None:
+    """Fichero temporal + fsync + os.replace: nunca queda un fichero a medias."""
+    descriptor, temporal = tempfile.mkstemp(dir=ruta.parent, prefix=f".{ruta.name}-", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "wb") as f:
+            f.write(datos)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporal, ruta)
+    except BaseException:
+        Path(temporal).unlink(missing_ok=True)
+        raise
+
+
 class BaseDatos:
     """Acceso a bd.csv. Cada método lee y verifica el fichero de nuevo."""
 
@@ -123,7 +151,7 @@ class BaseDatos:
         self.cfg = cfg
         self.extractor = extractor
         self.ruta = cfg.bd.ruta
-        self._claves: tuple[bytes, bytes] | None = None
+        self._claves: tuple[bytes, bytes, bytes, bytes] | None = None
 
     # ------------------------------------------------------------------ #
     # Claves
@@ -153,13 +181,103 @@ class BaseDatos:
             )
         return texto.encode("utf-8")
 
-    def _obtener_claves(self, crear: bool = False) -> tuple[bytes, bytes, bytes]:
-        """(clave HMAC de la BD, clave AES, clave de firma de templates) derivadas de la maestra."""
+    def _obtener_claves(self, crear: bool = False) -> tuple[bytes, bytes, bytes, bytes]:
+        """(HMAC de la BD, AES, firma de templates, sello anti-rollback), derivadas de la maestra."""
         if self._claves is None:
             maestra = self._clave_maestra(crear)
             self._claves = (_derivar(maestra, b"hmac"), _derivar(maestra, b"aes-gcm"),
-                            _derivar(maestra, b"template-sig"))
+                            _derivar(maestra, b"template-sig"), _derivar(maestra, b"sello"))
         return self._claves
+
+    def clave_junto_a_bd(self) -> bool:
+        """True si la clave se lee de un fichero en la misma carpeta que la BD (o dentro).
+
+        Es la configuración débil: quien puede escribir la BD suele poder leer
+        también la clave, y entonces puede volver a firmar lo que quiera."""
+        if os.environ.get(VARIABLE_CLAVE) is not None:
+            return False
+        carpeta_bd = self.ruta.resolve().parent
+        return self.cfg.bd.ruta_clave.resolve().is_relative_to(carpeta_bd)
+
+    # ------------------------------------------------------------------ #
+    # Sello anti-rollback
+    # ------------------------------------------------------------------ #
+    def ruta_sello(self) -> Path:
+        """Junto a la clave (no junto a la BD), con un nombre propio de cada BD."""
+        nombre = hashlib.sha256(str(self.ruta.resolve()).encode("utf-8")).hexdigest()[:16]
+        return self.cfg.bd.ruta_clave.parent / f"sello-{nombre}.json"
+
+    def _firma_sello(self, resumen: str, pendiente: str) -> str:
+        mensaje = _mensaje(VERSION, b"sello", str(self.ruta.resolve()).encode("utf-8"),
+                           resumen.encode("ascii"), pendiente.encode("ascii"))
+        return hmac.new(self._obtener_claves()[3], mensaje, hashlib.sha256).hexdigest()
+
+    @staticmethod
+    def _resumen(contenido: bytes | None) -> str:
+        return hashlib.sha256(contenido).hexdigest() if contenido is not None else "vacia"
+
+    def _escribir_sello(self, actual: str, pendiente: str = "") -> None:
+        """Guarda el resumen del CSV vigente y, durante una escritura, el del que viene.
+
+        Dos fases: antes de reemplazar el CSV se anuncia `pendiente`; después se
+        confirma como `actual`. Un lector que llegue en medio acepta cualquiera de
+        los dos, y si el proceso muere a mitad tampoco queda un falso rollback."""
+        datos = json.dumps({"bd": str(self.ruta.resolve()), "sha256": actual, "pendiente": pendiente,
+                            "hmac": self._firma_sello(actual, pendiente)}).encode("utf-8")
+        ruta = self.ruta_sello()
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+        _escribir_atomico(ruta, datos)
+
+    def _leer_sello(self) -> tuple[str, str] | None:
+        """(actual, pendiente) del sello verificado, o None si aún no hay sello."""
+        ruta = self.ruta_sello()
+        if not ruta.is_file():
+            return None
+        try:
+            sello = json.loads(ruta.read_text(encoding="utf-8"))
+            resumen, pendiente, firma = str(sello["sha256"]), str(sello.get("pendiente", "")), str(sello["hmac"])
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            raise IntegridadBD(f"El sello anti-rollback ({ruta}) está dañado") from e
+        if (not (firma.isascii() and resumen.isascii() and pendiente.isascii())
+                or not hmac.compare_digest(firma, self._firma_sello(resumen, pendiente))):
+            raise IntegridadBD(f"El sello anti-rollback ({ruta}) no es válido: alguien lo ha modificado")
+        return resumen, pendiente
+
+    def _comprobar_sello(self, contenido: bytes | None) -> None:
+        """Compara el CSV actual con el sello. Sin sello previo, sella el actual (TOFU)."""
+        if not self.cfg.bd.anti_rollback:
+            return
+        sello = self._leer_sello()
+        if sello is None:
+            if contenido is not None:
+                self._escribir_sello(self._resumen(contenido))
+            return
+        actual = self._resumen(contenido)
+        if not any(r and hmac.compare_digest(actual, r) for r in sello):
+            ruta = self.ruta_sello()
+            if contenido is None:
+                raise IntegridadBD("La base de datos ha desaparecido: el sello dice que existía. "
+                                   f"Si la has borrado tú a propósito, borra también {ruta}")
+            raise IntegridadBD(
+                "La base de datos no es la última que escribió el sistema (rollback): alguien ha "
+                "vuelto a una copia anterior o la ha cambiado entera")
+
+    # ------------------------------------------------------------------ #
+    # Bloqueo entre procesos
+    # ------------------------------------------------------------------ #
+    @contextlib.contextmanager
+    def _bloqueo(self):
+        """Exclusión mutua para leer-modificar-escribir el CSV (también entre procesos)."""
+        if fcntl is None:
+            yield
+            return
+        self.ruta.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.ruta.parent / f".{self.ruta.name}.lock", "a+b") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
     def _hmac(self, indice: int, total: int, id_persona: str, campo: str) -> str:
         mensaje = _mensaje(VERSION, str(indice).encode(), str(total).encode(),
@@ -230,9 +348,11 @@ class BaseDatos:
     def _leer_filas(self) -> list[tuple[str, str]]:
         """Lee y verifica el CSV. Devuelve (id, campo template) por fila."""
         if not self.ruta.is_file():
+            self._comprobar_sello(None)  # ¿la han borrado? (solo con anti_rollback)
             return []
+        bruto = self.ruta.read_bytes()
         try:
-            texto = self.ruta.read_text(encoding="utf-8")
+            texto = bruto.decode("utf-8")
         except UnicodeDecodeError as e:
             raise BDCorrupta("La base de datos no es texto UTF-8") from e
         try:
@@ -262,6 +382,8 @@ class BaseDatos:
                     "o la clave no es la correcta"
                 )
             resultado.append((id_persona, campo))
+        # Filas válidas una a una; ahora, ¿es el CSV que escribimos la última vez?
+        self._comprobar_sello(bruto)
         return resultado
 
     def _escribir_filas(self, filas: list[tuple[str, str]]) -> None:
@@ -273,16 +395,17 @@ class BaseDatos:
             escritor.writerow([id_persona, campo, self._hmac(indice, total, id_persona, campo)])
 
         self.ruta.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporal = tempfile.mkstemp(dir=self.ruta.parent, prefix=".bd-", suffix=".tmp")
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as f:
-                f.write(salida.getvalue())
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(temporal, self.ruta)
-        except BaseException:
-            Path(temporal).unlink(missing_ok=True)
-            raise
+        contenido = salida.getvalue().encode("utf-8")
+        if not self.cfg.bd.anti_rollback:
+            _escribir_atomico(self.ruta, contenido)
+            return
+        # Sello en dos fases (ver _escribir_sello). Quien escribe ya ha leído y
+        # verificado el CSV, así que el resumen vigente es el del fichero actual.
+        anterior = self._resumen(self.ruta.read_bytes() if self.ruta.is_file() else None)
+        nuevo = self._resumen(contenido)
+        self._escribir_sello(anterior, pendiente=nuevo)
+        _escribir_atomico(self.ruta, contenido)
+        self._escribir_sello(nuevo)
 
     def _cargar(self) -> list[tuple[str, str, np.ndarray]]:
         """Lee, verifica la integridad y decodifica: (id, campo template, template) por fila."""
@@ -325,32 +448,52 @@ class BaseDatos:
         """Añade una muestra. Devuelve cuántas muestras tiene ya esa persona."""
         id_persona = validar_id(id_persona)
         template = self.extractor.validar_template(template)
-        self._obtener_claves(crear=not self.ruta.is_file())
-        # Se verifica y decodifica el fichero completo antes de reescribirlo:
-        # nunca se vuelve a firmar contenido que no pasó la verificación.
-        filas = self._cargar()
-        existentes = sum(id_fila == id_persona for id_fila, _, _ in filas)
-        if existentes >= self.cfg.limites.max_muestras_por_id:
-            raise LimiteMuestras(
-                f"'{id_persona}' ya tiene {existentes} muestras "
-                f"(máximo {self.cfg.limites.max_muestras_por_id})"
-            )
-        nuevas = [(id_fila, campo) for id_fila, campo, _ in filas]
-        nuevas.append((id_persona, self._codificar(id_persona, template)))
-        self._escribir_filas(nuevas)
-        return existentes + 1
-
+        with self._bloqueo():
+            self._obtener_claves(crear=not self.ruta.is_file())
+            # Se verifica y decodifica el fichero completo antes de reescribirlo:
+            # nunca se vuelve a firmar contenido que no pasó la verificación.
+            filas = self._cargar()
+            existentes = sum(id_fila == id_persona for id_fila, _, _ in filas)
+            if existentes >= self.cfg.limites.max_muestras_por_id:
+                raise LimiteMuestras(
+                    f"'{id_persona}' ya tiene {existentes} muestras "
+                    f"(máximo {self.cfg.limites.max_muestras_por_id})"
+                )
+            nuevas = [(id_fila, campo) for id_fila, campo, _ in filas]
+            nuevas.append((id_persona, self._codificar(id_persona, template)))
+            self._escribir_filas(nuevas)
+            return existentes + 1
 
     def eliminar(self, id_persona: str) -> int:
         """Borra todas las muestras de una persona. Devuelve cuántas se han borrado."""
         id_persona = validar_id(id_persona)
-        filas = self._cargar()  # verifica la integridad antes de reescribir
-        quedan = [(id_fila, campo) for id_fila, campo, _ in filas if id_fila != id_persona]
-        borradas = len(filas) - len(quedan)
-        if borradas == 0:
-            raise IdNoInscrito(f"'{id_persona}' no está inscrito")
-        self._escribir_filas(quedan)
-        return borradas
+        with self._bloqueo():
+            filas = self._cargar()  # verifica la integridad antes de reescribir
+            quedan = [(id_fila, campo) for id_fila, campo, _ in filas if id_fila != id_persona]
+            borradas = len(filas) - len(quedan)
+            if borradas == 0:
+                raise IdNoInscrito(f"'{id_persona}' no está inscrito")
+            self._escribir_filas(quedan)
+            return borradas
+
+    def recodificar(self) -> dict[str, dict[str, str]]:
+        """Reescribe todas las muestras con la codificación actual (p. ej. para CIFRAR
+        una BD que estaba en claro tras poner `cifrar_templates: true`).
+
+        Devuelve {id: {clave antigua: clave nueva}} para mover las fotos de la galería
+        (la clave de una muestra es el hash de su campo, que cambia al cifrar)."""
+        with self._bloqueo():
+            filas = self._cargar()
+            cambios: dict[str, dict[str, str]] = defaultdict(dict)
+            nuevas = []
+            for id_fila, campo, template in filas:
+                cifrado = campo.startswith(PREFIJO_CIFRADO)
+                nuevo = campo if cifrado == self.cfg.bd.cifrar_templates else self._codificar(id_fila, template)
+                cambios[id_fila][self.clave_muestra(campo)] = self.clave_muestra(nuevo)
+                nuevas.append((id_fila, nuevo))
+            if filas:
+                self._escribir_filas(nuevas)
+            return dict(cambios)
 
     # ------------------------------------------------------------------ #
     # Muestras individuales (para editar la BD desde la web)
@@ -376,13 +519,14 @@ class BaseDatos:
     def eliminar_muestra(self, id_persona: str, clave: str) -> int:
         """Borra una muestra concreta. Devuelve cuántas le quedan a esa persona."""
         id_persona = validar_id(id_persona)
-        filas = self._cargar()
-        quedan = [(i, c) for i, c, _ in filas
-                  if not (i == id_persona and self.clave_muestra(c) == clave)]
-        if len(quedan) == len(filas):
-            raise MuestraNoEncontrada(f"'{id_persona}' no tiene ninguna muestra con clave {clave}")
-        self._escribir_filas(quedan)
-        return sum(i == id_persona for i, _ in quedan)
+        with self._bloqueo():
+            filas = self._cargar()
+            quedan = [(i, c) for i, c, _ in filas
+                      if not (i == id_persona and self.clave_muestra(c) == clave)]
+            if len(quedan) == len(filas):
+                raise MuestraNoEncontrada(f"'{id_persona}' no tiene ninguna muestra con clave {clave}")
+            self._escribir_filas(quedan)
+            return sum(i == id_persona for i, _ in quedan)
 
     def renombrar(self, id_persona: str, nuevo: str) -> dict[str, str]:
         """Cambia el id de todas las muestras de una persona.
@@ -392,22 +536,24 @@ class BaseDatos:
         a cifrar.
         """
         id_persona, nuevo = validar_id(id_persona), validar_id(nuevo)
-        filas = self._cargar()
-        if not any(i == id_persona for i, _, _ in filas):
-            raise IdNoInscrito(f"'{id_persona}' no está inscrito")
-        if nuevo != id_persona and any(i == nuevo for i, _, _ in filas):
-            raise IdInvalido(f"Ya hay alguien inscrito como '{nuevo}'")
-        claves: dict[str, str] = {}
-        nuevas = []
-        for i, campo, template in filas:
-            if i == id_persona:
-                nuevo_campo = self._codificar(nuevo, template) if campo.startswith(PREFIJO_CIFRADO) else campo
-                claves[self.clave_muestra(campo)] = self.clave_muestra(nuevo_campo)
-                nuevas.append((nuevo, nuevo_campo))
-            else:
-                nuevas.append((i, campo))
-        self._escribir_filas(nuevas)
-        return claves
+        with self._bloqueo():
+            filas = self._cargar()
+            if not any(i == id_persona for i, _, _ in filas):
+                raise IdNoInscrito(f"'{id_persona}' no está inscrito")
+            if nuevo != id_persona and any(i == nuevo for i, _, _ in filas):
+                raise IdInvalido(f"Ya hay alguien inscrito como '{nuevo}'")
+            claves: dict[str, str] = {}
+            nuevas = []
+            for i, campo, template in filas:
+                if i == id_persona:
+                    nuevo_campo = (self._codificar(nuevo, template) if campo.startswith(PREFIJO_CIFRADO)
+                                   else campo)
+                    claves[self.clave_muestra(campo)] = self.clave_muestra(nuevo_campo)
+                    nuevas.append((nuevo, nuevo_campo))
+                else:
+                    nuevas.append((i, campo))
+            self._escribir_filas(nuevas)
+            return claves
 
     def claves_por_id(self) -> dict[str, list[str]]:
         """{id: [claves de sus muestras]} en el orden del fichero."""

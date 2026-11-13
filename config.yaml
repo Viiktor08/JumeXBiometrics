@@ -28,10 +28,12 @@ extractor:
 
 bd:
   ruta: data/bd.csv
-  # Clave HMAC para la integridad del CSV. Tiene prioridad la variable de
-  # entorno BIOMETRIA_HMAC_KEY; si no existe, se lee este fichero (fuera de git).
-  ruta_clave: data/clave_hmac.key
-  cifrar_templates: false   # true -> templates cifrados con AES-GCM en el CSV
+  # Clave maestra (HMAC, cifrado, firma de templates y sello). Tiene prioridad la
+  # variable de entorno BIOMETRIA_HMAC_KEY; si no, este fichero. Va FUERA de data/ y
+  # del repositorio: quien pueda leer o escribir la BD no debe poder leer la clave.
+  ruta_clave: ~/.jumex/clave_bd.key
+  cifrar_templates: true    # templates cifrados con AES-GCM: leer el CSV no da los vectores
+  anti_rollback: true       # sello junto a la clave: detecta volver a una BD antigua o borrarla
   agregacion: max           # cómo combinar varias muestras de una persona: max | media
 
 umbrales:
@@ -57,3 +59,12 @@ defensa:
   decimales_puntuacion_t: 2  # la puntuación que sale por _t se redondea a 2 decimales
   max_intentos_t: 50         # máx. comparaciones _t por id en la ventana (0 = sin límite)
   ventana_intentos_s: 60     # ventana del límite anterior, en segundos
+  # Paso 2 (estricto): los _t RECHAZAN templates sin firma válida de este sistema
+  # (fabricados, copiados de la BD o ajustados). `extraer` crea la firma (.sig).
+  exigir_firma_t: true
+  # Paso 4: en identificar, el 1.º debe sacar al 2.º al menos esto; si no, "ambiguo"
+  # -> desconocido. LFW (291 personas): 0 aciertos perdidos hasta 0.15.
+  margen_identificacion: 0.10
+  # Paso 5: los _sd comprueban que la imagen es una cara (LFW: 100 % de recortes
+  # legítimos aceptados; 100 % de ruido y 99 % de trozos de fondo rechazados).
+  cara_en_sd: true

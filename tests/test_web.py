@@ -1,5 +1,6 @@
 """Tests del extractor SFace y de la demo web JumeX Lens (API y galería)."""
 
+import re
 import http.client
 import json
 import threading
@@ -131,7 +132,8 @@ def config_web(tmp_path, monkeypatch, detector):
     monkeypatch.delenv(VARIABLE_CLAVE, raising=False)
     texto = (RAIZ_REPO / "config.yaml").read_text(encoding="utf-8")
     texto = texto.replace("ruta: data/bd.csv", f"ruta: {tmp_path / 'bd.csv'}")
-    texto = texto.replace("ruta_clave: data/clave_hmac.key", f"ruta_clave: {tmp_path / 'k.key'}")
+    re_clave = f"ruta_clave: {tmp_path / 'k.key'}"
+    texto = re.sub(r"ruta_clave: \S+", lambda _: re_clave, texto)
     texto = texto.replace("modelo: models/", f"modelo: {RAIZ_REPO / 'models'}/")
     config = tmp_path / "config.yaml"
     config.write_text(texto, encoding="utf-8")
@@ -341,7 +343,9 @@ def test_web_ficha_y_edicion_de_persona(admin, ruta_astronauta, astronauta):
     assert peticion(servidor, "GET", "/api/persona?id=Eileen", cabeceras=cab)[0] == 404
     assert peticion(servidor, "POST", "/api/persona/renombrar?id=Eileen%20Collins&nuevo=%3Dmal", None, cab)[0] == 400
 
-    # Borrar la última muestra elimina a la persona
+    # Borrar la última muestra elimina a la persona. (Con la BD cifrada, renombrar
+    # vuelve a cifrar con el id nuevo y la clave de la muestra cambia: se toma de la ficha.)
+    segunda = ficha["muestras"][0]["clave"]
     _, r, _ = peticion(servidor, "DELETE", f"/api/muestras?id=Eileen%20Collins&clave={segunda}", cabeceras=cab)
     assert r["resultado"]["quedan"] == 0
     assert peticion(servidor, "GET", "/api/personas", cabeceras=cab)[1]["personas"] == []
@@ -351,7 +355,8 @@ def test_web_dominio_del_tunel(tmp_path, monkeypatch, detector):
     monkeypatch.delenv(VARIABLE_CLAVE, raising=False)
     texto = (RAIZ_REPO / "config.yaml").read_text(encoding="utf-8")
     texto = texto.replace("ruta: data/bd.csv", f"ruta: {tmp_path / 'bd.csv'}")
-    texto = texto.replace("ruta_clave: data/clave_hmac.key", f"ruta_clave: {tmp_path / 'k.key'}")
+    re_clave = f"ruta_clave: {tmp_path / 'k.key'}"
+    texto = re.sub(r"ruta_clave: \S+", lambda _: re_clave, texto)
     texto = texto.replace("modelo: models/", f"modelo: {RAIZ_REPO / 'models'}/")
     (tmp_path / "config.yaml").write_text(texto, encoding="utf-8")
     srv = crear_servidor(tmp_path / "config.yaml", "127.0.0.1", 0, ("trycloudflare.com",))
@@ -381,7 +386,8 @@ def test_web_solo_lista_como_parecidos_a_los_que_superan_el_umbral(config_web, r
     # Personas "al azar": en 512 dimensiones, dos vectores al azar son casi
     # perpendiculares (similitud ~0): nunca deben salir como parecidas
     for i in range(5):
-        app.sistema.inscribir_t(f"Persona {i}", _vector_al_azar(i))
+        v = _vector_al_azar(i)
+        app.sistema.inscribir_t(f"Persona {i}", v, firma=app.sistema.firmar(v))
 
     r = app.operar("identificar", None, foto)["resultado"]
     assert r["identificado"] and r["id"] == "Eileen Collins"

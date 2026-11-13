@@ -53,7 +53,7 @@ def main() -> int:
         try:
             if analisis.error is not None:
                 raise analisis.error
-            r = sistema.inscribir_t(fila["id"], analisis.template)
+            r = sistema.inscribir_t(fila["id"], analisis.template, firma=sistema.firmar(analisis.template))
             clave = sistema.bd.muestras_de(r.id)[-1][0]  # la recién añadida va al final
             galeria.guardar_muestra_de_analisis(r.id, clave, analisis)
             resultados["ok"] += 1

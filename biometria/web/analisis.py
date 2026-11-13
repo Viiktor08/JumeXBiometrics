@@ -307,6 +307,26 @@ class Galeria:
         if self.ruta_legado(id_persona).is_file():
             self.ruta_legado(id_persona).replace(self.ruta_legado(nuevo))
 
+    def cambiar_claves(self, id_persona: str, claves: dict[str, str]) -> None:
+        """Renombra las fotos de una persona cuando cambian las claves de sus muestras
+        (p. ej. al cifrar la BD: la clave es el hash del campo, que cambia)."""
+        carpeta = self.carpeta_persona(id_persona)
+        if not carpeta.is_dir():
+            return
+        temporales = []
+        for vieja, nueva in claves.items():  # en dos pasos: una clave nueva podría ser otra vieja
+            origen = carpeta / f"{vieja}.jpg"
+            if vieja != nueva and origen.is_file():
+                temporal = carpeta / f"{vieja}.jpg.mover"
+                origen.replace(temporal)
+                temporales.append((temporal, carpeta / f"{nueva}.jpg"))
+        for temporal, destino in temporales:
+            temporal.replace(destino)
+        principal = carpeta / "principal"
+        if principal.is_file():
+            antigua = principal.read_text(encoding="ascii").strip()
+            principal.write_text(claves.get(antigua, antigua), encoding="ascii")
+
     def migrar(self, muestras_por_id: dict[str, list[str]]) -> int:
         """Pasa los retratos antiguos (uno por persona) a foto de muestra cuando la
         persona tiene una sola muestra: entonces es seguro que es la suya."""
