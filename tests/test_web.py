@@ -4,6 +4,7 @@ import re
 import http.client
 import json
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -15,6 +16,7 @@ from biometria.extractores import crear_extractor
 from biometria.extractores.arcface import MODELO_POR_DEFECTO as MODELO_ARCFACE
 from biometria.extractores.sface import MODELO_POR_DEFECTO, ExtractorSFace
 from biometria.web.analisis import Galeria, analizar
+from biometria.web import servidor as servidor_mod
 from biometria.web.servidor import Aplicacion, crear_servidor
 from tests.conftest import cfg_con
 
@@ -522,3 +524,99 @@ def test_inscripcion_abierta_caduca(config_web, ruta_astronauta):
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+# --- Paso 8: endurecimiento de la web ----------------------------------------
+
+def test_pin_bloqueado_tras_varios_fallos(servidor):
+    """Fuerza bruta del PIN: tras 5 fallos, ni el PIN correcto entra (429)."""
+    for _ in range(servidor_mod.MAX_FALLOS_PIN_IP):
+        assert peticion(servidor, "POST", "/api/login", b"mal-mal-mal")[0] == 401
+    estado, r, _ = peticion(servidor, "POST", "/api/login", PIN_ADMIN.encode())
+    assert estado == 429 and r["error"]["error"] == "pin_bloqueado"
+
+
+def test_bloqueo_por_ip_y_general(config_web):
+    app = Aplicacion(config_web, admin_pass=PIN_ADMIN)
+    for _ in range(servidor_mod.MAX_FALLOS_PIN_IP):
+        app.login("mal", "1.1.1.1")
+    token, espera = app.login(PIN_ADMIN, "1.1.1.1")
+    assert token is None and espera > 0                    # esa IP, bloqueada (aun con el PIN bueno)
+    assert app.login(PIN_ADMIN, "2.2.2.2")[0] is not None  # otra IP entra
+    # Un atacante que rota de IP agota el cupo general: bloqueo para todos
+    for i in range(servidor_mod.MAX_FALLOS_PIN_TOTAL):
+        app.login("mal", f"10.0.0.{i}")
+    assert app.login(PIN_ADMIN, "3.3.3.3")[1] > 0
+
+
+def test_la_sesion_caduca(config_web, monkeypatch):
+    app = Aplicacion(config_web, admin_pass=PIN_ADMIN)
+    token, _ = app.login(PIN_ADMIN)
+    assert app.es_admin(token)
+    ahora = time.monotonic()
+    monkeypatch.setattr(servidor_mod.time, "monotonic", lambda: ahora + servidor_mod.DURACION_SESION_S + 1)
+    assert not app.es_admin(token)
+
+
+def test_cookie_con_caducidad(servidor):
+    _, _, resp = peticion(servidor, "POST", "/api/login", PIN_ADMIN.encode())
+    cookie = resp.getheader("Set-Cookie")
+    assert f"Max-Age={servidor_mod.DURACION_SESION_S}" in cookie and "HttpOnly" in cookie
+    assert "Secure" not in cookie  # en local es HTTP; por el túnel lleva Secure
+
+
+def test_limite_de_peticiones_por_ip(config_web, ruta_astronauta, monkeypatch):
+    monkeypatch.setattr(servidor_mod, "MAX_PETICIONES_IP", 3)
+    srv = crear_servidor(config_web, "127.0.0.1", 0, admin_pass=PIN_ADMIN)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    puerto = srv.server_address[1]
+    try:
+        foto = ruta_astronauta.read_bytes()
+        estados = [peticion(puerto, "POST", "/api/identificar", foto)[0] for _ in range(4)]
+        assert estados[:3] == [200, 200, 200] and estados[3] == 429
+        # El admin no tiene ese límite
+        cab = {"Cookie": cookie_admin(puerto)}
+        assert peticion(puerto, "POST", "/api/identificar", foto, cab)[0] == 200
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_conexion_callada_se_cierra(servidor, monkeypatch):
+    """Slowloris: quien abre la conexión y no manda nada no ocupa un hilo para siempre."""
+    import socket
+    assert servidor_mod.Manejador.timeout == servidor_mod.TIMEOUT_SOCKET_S
+    monkeypatch.setattr(servidor_mod.Manejador, "timeout", 1)  # para no esperar 20 s en el test
+    s = socket.create_connection(("127.0.0.1", servidor))
+    s.settimeout(10)
+    inicio = time.monotonic()
+    assert s.recv(1) == b""  # el servidor cierra
+    assert time.monotonic() - inicio < 5
+    s.close()
+
+
+@pytest.mark.parametrize("pin, debil", [("1234", True), ("12345678", True), ("aaaaaaaa", True),
+                                        ("password", True), ("pin-de-prueba-1234", False),
+                                        ("Xk3-p9Lq", False)])
+def test_pin_debil(pin, debil):
+    assert (servidor_mod.pin_debil(pin) is not None) is debil
+
+
+def test_pin_debil_no_arranca_con_tunel(capsys):
+    assert servidor_mod.main(["--tunel", "--admin-pass", "1234", "--no-abrir"]) == 1
+    assert "PIN" in capsys.readouterr().out
+
+
+def test_verificar_no_revela_quien_esta_inscrito(config_web, ruta_astronauta):
+    """Un usuario que verifica un nombre inexistente recibe un rechazo normal, no
+    'no inscrito': así no puede ir probando nombres para saber quién está."""
+    app = Aplicacion(config_web, admin_pass=PIN_ADMIN)
+    foto = ruta_astronauta.read_bytes()
+    app.operar("inscribir", "Eileen Collins", foto)
+    r = app.operar("verificar", "Nadie Inventado", foto, admin=False)
+    assert r["ok"] and r["resultado"]["aceptado"] is False
+    assert 0.0 <= r["resultado"]["puntuacion"] < app.cfg.umbrales.verificacion
+    # Mismo nombre, misma respuesta (no se nota que es inventada)
+    assert app.operar("verificar", "Nadie Inventado", foto, admin=False)["resultado"] == r["resultado"]
+    # El admin sí ve el motivo real
+    assert app.operar("verificar", "Nadie Inventado", foto)["error"]["error"] == "id_no_inscrito"

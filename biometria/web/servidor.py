@@ -34,6 +34,7 @@ y se rechazan las peticiones cuyo Host no sea localhost.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import hmac
 import json
 import math
@@ -46,11 +47,14 @@ import subprocess
 import threading
 import time
 import webbrowser
+from collections import deque
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+
+import numpy as np
 
 from biometria.config import RAIZ_REPO, cargar_config
 from biometria.bd import validar_id
@@ -75,6 +79,73 @@ DOMINIO_TUNEL = "trycloudflare.com"
 PATRON_URL_TUNEL = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 VARIABLE_ADMIN = "BIOMETRIA_ADMIN_PASS"
 COOKIE_SESION = "jumex_sesion"
+
+# --- Endurecimiento de la web (THREAT_MODEL.md, paso 8) ---------------------
+DURACION_SESION_S = 2 * 3600       # la sesión de admin caduca a las 2 h
+MAX_FALLOS_PIN_IP = 5              # fallos de PIN por IP en la ventana -> bloqueo de esa IP
+MAX_FALLOS_PIN_TOTAL = 20          # fallos de PIN de todo el mundo -> bloqueo general (IPs rotando)
+VENTANA_PIN_S = 15 * 60
+MAX_PETICIONES_IP = 60             # operaciones con foto por IP y minuto (cada una gasta CPU)
+VENTANA_PETICIONES_S = 60
+TIMEOUT_SOCKET_S = 20              # una conexión callada más tiempo se cierra (slowloris)
+MAX_CONEXIONES = 32                # conexiones a la vez; las demás se cierran al momento
+LONGITUD_MINIMA_PIN = 8
+PINS_COMUNES = {"password", "contraseña", "admin", "administrador", "qwerty", "jumex", "jumexlens",
+                "letmein", "iloveyou", "biometria", "abc123", "abcd1234", "qwertyui"}
+
+
+def pin_debil(pin: str) -> str | None:
+    """Motivo por el que un PIN es débil (None si es aceptable)."""
+    if len(pin) < LONGITUD_MINIMA_PIN:
+        return f"tiene menos de {LONGITUD_MINIMA_PIN} caracteres"
+    if pin.casefold() in PINS_COMUNES:
+        return "es una contraseña muy común"
+    if len(set(pin)) <= 2:
+        return "repite casi siempre el mismo carácter"
+    if pin.isdigit() and (pin in "01234567890123456789" or pin in "98765432109876543210"):
+        return "es una secuencia de números"
+    return None
+
+
+class Limitador:
+    """Cuenta sucesos por clave en una ventana deslizante (en memoria, seguro entre hilos)."""
+
+    def __init__(self, maximo: int, ventana_s: float):
+        self.maximo, self.ventana = maximo, ventana_s
+        self._marcas: dict[str, deque[float]] = {}
+        self._lock = threading.Lock()
+
+    def _limpiar(self, clave: str, ahora: float) -> deque[float]:
+        if len(self._marcas) > 10_000:  # que el diccionario no crezca sin fin
+            self._marcas = {k: m for k, m in self._marcas.items() if m and ahora - m[-1] <= self.ventana}
+        marcas = self._marcas.setdefault(clave, deque())
+        while marcas and ahora - marcas[0] > self.ventana:
+            marcas.popleft()
+        return marcas
+
+    def espera(self, clave: str) -> int:
+        """Segundos hasta que `clave` vuelva a tener cupo (0 = tiene cupo ya)."""
+        ahora = time.monotonic()
+        with self._lock:
+            marcas = self._marcas.get(clave)
+            if not marcas:
+                return 0
+            marcas = self._limpiar(clave, ahora)
+            return 0 if len(marcas) < self.maximo else max(1, math.ceil(self.ventana - (ahora - marcas[0])))
+
+    def anotar(self, clave: str) -> None:
+        with self._lock:
+            self._limpiar(clave, time.monotonic()).append(time.monotonic())
+
+    def consumir(self, clave: str) -> int:
+        """Anota un suceso si hay cupo y devuelve 0; si no, los segundos de espera."""
+        ahora = time.monotonic()
+        with self._lock:
+            marcas = self._limpiar(clave, ahora)
+            if len(marcas) >= self.maximo:
+                return max(1, math.ceil(self.ventana - (ahora - marcas[0])))
+            marcas.append(ahora)
+            return 0
 
 
 class Aplicacion:
@@ -101,7 +172,12 @@ class Aplicacion:
         # imprime al arrancar). La comparación es en tiempo constante.
         self.admin_pass = admin_pass or os.environ.get(VARIABLE_ADMIN) or secrets.token_urlsafe(9)
         self.admin_pass_generada = not (admin_pass or os.environ.get(VARIABLE_ADMIN))
-        self._sesiones: set[str] = set()  # tokens de sesión admin vivos (en memoria)
+        self._sesiones: dict[str, float] = {}  # token de sesión admin -> caducidad (monotonic)
+        self.fallos_pin_ip = Limitador(MAX_FALLOS_PIN_IP, VENTANA_PIN_S)
+        self.fallos_pin_total = Limitador(MAX_FALLOS_PIN_TOTAL, VENTANA_PIN_S)
+        self.peticiones_ip = Limitador(MAX_PETICIONES_IP, VENTANA_PETICIONES_S)
+        # Sal de este proceso para la respuesta uniforme de verificar (ver _verificar_uniforme)
+        self._sal = secrets.token_bytes(16)
         # Inscripción abierta TEMPORAL: cualquiera puede añadir personas NUEVAS (el "+")
         # hasta `_abierta_hasta`. Sin la opción de arranque no existe; caduca sola.
         self._abierta_hasta = (time.monotonic() + inscripcion_abierta_min * 60
@@ -115,21 +191,36 @@ class Aplicacion:
     # ------------------------------------------------------------------ #
     # Sesiones / roles
     # ------------------------------------------------------------------ #
-    def login(self, contrasena: str) -> str | None:
-        """Comprueba la contraseña de admin y, si es correcta, crea una sesión."""
-        if not contrasena or not hmac.compare_digest(contrasena, self.admin_pass):
-            return None
+    def login(self, contrasena: str, ip: str = "local") -> tuple[str | None, int]:
+        """Comprueba el PIN. Devuelve (token de sesión o None, segundos de bloqueo).
+
+        Contra la fuerza bruta: tras MAX_FALLOS_PIN_IP fallos desde una IP en la
+        ventana, esa IP queda bloqueada; tras MAX_FALLOS_PIN_TOTAL fallos de
+        cualquiera, se bloquea el login para todos (por si el atacante va
+        cambiando de IP). Mientras dura el bloqueo, ni siquiera se mira el PIN:
+        acertar en ese momento tampoco sirve."""
+        espera = max(self.fallos_pin_ip.espera(ip), self.fallos_pin_total.espera("*"))
+        if espera:
+            return None, espera
+        texto = contrasena.encode("utf-8")
+        if not contrasena or not hmac.compare_digest(texto, self.admin_pass.encode("utf-8")):
+            self.fallos_pin_ip.anotar(ip)
+            self.fallos_pin_total.anotar("*")
+            return None, 0
         token = secrets.token_urlsafe(24)
         with self.lock:
-            self._sesiones.add(token)
-        return token
+            ahora = time.monotonic()
+            self._sesiones = {t: c for t, c in self._sesiones.items() if c > ahora}  # purga caducadas
+            self._sesiones[token] = ahora + DURACION_SESION_S
+        return token, 0
 
     def logout(self, token: str | None) -> None:
         with self.lock:
-            self._sesiones.discard(token or "")
+            self._sesiones.pop(token or "", None)
 
     def es_admin(self, token: str | None) -> bool:
-        return bool(token) and token in self._sesiones
+        caducidad = self._sesiones.get(token or "")
+        return caducidad is not None and caducidad > time.monotonic()
 
     # ------------------------------------------------------------------ #
     # Inscripción abierta temporal (el "+")
@@ -285,6 +376,21 @@ class Aplicacion:
         respuesta["error"] = error.a_dict()
         return respuesta
 
+    def _verificar_uniforme(self, id_persona: str, analisis: Analisis) -> dict:
+        """Verificar un nombre que NO existe, visto por un usuario: se responde como un
+        rechazo normal, para que verificar no sirva para averiguar quién está inscrito.
+
+        La puntuación es la de la foto frente a un vector "fantasma" que sale de un
+        hash del nombre (con una sal de este proceso): parece la de un impostor
+        cualquiera y es la misma cada vez que se prueba ese nombre."""
+        semilla = hashlib.sha256(self._sal + validar_id(id_persona).casefold().encode("utf-8")).digest()
+        fantasma = np.random.default_rng(int.from_bytes(semilla[:8], "big")).standard_normal(
+            analisis.template.size).astype(np.float32)
+        fantasma /= np.linalg.norm(fantasma)
+        puntuacion = self.sistema._redondear(self.sistema.extractor.comparar(analisis.template, fantasma))
+        return {"id": validar_id(id_persona), "aceptado": False, "puntuacion": puntuacion,
+                "umbral": self.cfg.umbrales.verificacion, "foto": None}
+
     def operar(self, operacion: str, id_persona: str | None, foto: bytes,
                region=None, admin: bool = True) -> dict:
         with self.lock:
@@ -299,7 +405,9 @@ class Aplicacion:
             try:
                 respuesta["resultado"] = getattr(self, f"_{operacion}")(id_persona, analisis)
             except ErrorBiometrico as e:
-                return self._error(respuesta, e)
+                if not (operacion == "verificar" and not admin and e.codigo == "id_no_inscrito"):
+                    return self._error(respuesta, e)
+                respuesta["resultado"] = self._verificar_uniforme(id_persona, analisis)
             respuesta["tiempos_ms"]["comparacion"] = round((time.perf_counter() - inicio) * 1000, 1)
             return self._filtrar_rol(respuesta, admin)
 
@@ -344,6 +452,7 @@ class Aplicacion:
                                        _contar=False)
         return {"id": r.id, "identificado": r.identificado, "puntuacion": r.puntuacion,
                 "umbral": r.umbral, "parecido": self.cfg.umbrales.parecido,
+                "ambiguo": r.ambiguo, "margen": self.cfg.defensa.margen_identificacion,
                 "foto": self.url_foto(r.id) if r.id else None,
                 "candidatos": self._candidatos(analisis.template),
                 "personas": len(self.sistema.bd.ids())}
@@ -372,7 +481,7 @@ class Aplicacion:
                 r = self.sistema.identificar_t(cara.template, firma=self.sistema.firmar(cara.template),
                                                _contar=False)
                 item.update(estado="identificada" if r.identificado else "desconocida",
-                            id=r.id, puntuacion=r.puntuacion,
+                            id=r.id, puntuacion=r.puntuacion, ambiguo=r.ambiguo,
                             foto=self.url_foto(r.id) if r.id else None,
                             candidatos=self._candidatos(cara.template))
             lista.append(item)
@@ -408,6 +517,8 @@ def _estado_http(error: ErrorBiometrico) -> int:
         return HTTPStatus.NOT_FOUND
     if error.codigo == "id_invalido":
         return HTTPStatus.BAD_REQUEST
+    if error.codigo == "template_no_firmado":
+        return HTTPStatus.FORBIDDEN
     if error.codigo == "demasiados_intentos":
         return HTTPStatus.TOO_MANY_REQUESTS
     return HTTPStatus.CONFLICT
@@ -419,6 +530,8 @@ def _template_json(template) -> dict:
 
 class Manejador(BaseHTTPRequestHandler):
     server_version = "JumeXLens/1.0"
+    sys_version = ""  # no anunciar la versión de Python en la cabecera Server
+    timeout = TIMEOUT_SOCKET_S  # socket: una conexión que no manda nada se cierra (slowloris)
     app: Aplicacion  # se asigna al crear el servidor
     dominios_extra: tuple[str, ...] = ()  # además de localhost (túnel)
 
@@ -470,6 +583,18 @@ class Manejador(BaseHTTPRequestHandler):
         self._fallo(HTTPStatus.FORBIDDEN, "requiere_admin",
                     "Esta acción es solo para el administrador. Introduce el PIN de administrador.")
         return False
+
+    def _ip(self) -> str:
+        """IP del cliente. Con el túnel, todas las conexiones llegan desde cloudflared
+        (127.0.0.1): la IP real la pone Cloudflare en CF-Connecting-IP (y la
+        sobrescribe aunque el cliente la mande). Sin túnel, esa cabecera no se cree."""
+        if self.dominios_extra and self.headers.get("CF-Connecting-IP"):
+            return self.headers["CF-Connecting-IP"].strip()[:64]
+        return self.client_address[0]
+
+    def _por_tunel(self) -> bool:
+        host = (self.headers.get("Host") or "").split(":")[0].lower()
+        return any(host == d or host.endswith("." + d) for d in self.dominios_extra)
 
     def _host_valido(self) -> bool:
         host = self.headers.get("Host") or ""
@@ -555,12 +680,19 @@ class Manejador(BaseHTTPRequestHandler):
         partes = urlsplit(self.path)
         # Entrar / salir del modo administrador (el cuerpo es el PIN, no una foto)
         if partes.path == "/api/login":
-            token = self.app.login(foto.decode("utf-8", "ignore").strip())
+            token, espera = self.app.login(foto.decode("utf-8", "ignore").strip(), self._ip())
+            if espera:
+                self.log_message("login bloqueado para %s (%ss)", self._ip(), espera)
+                return self._fallo(HTTPStatus.TOO_MANY_REQUESTS, "pin_bloqueado",
+                                   f"Demasiados PIN incorrectos. Login bloqueado {math.ceil(espera / 60)} min.")
             if token is None:
+                self.log_message("PIN incorrecto desde %s", self._ip())
                 return self._fallo(HTTPStatus.UNAUTHORIZED, "pin_incorrecto", "PIN de administrador incorrecto")
-            # HttpOnly: el PIN/sesión no es accesible desde JavaScript (anti-XSS).
+            # HttpOnly: la sesión no es accesible desde JavaScript (anti-XSS).
             # SameSite=Strict + la cabecera X-JumeX-Lens ya cubren el CSRF.
-            cookie = f"{COOKIE_SESION}={token}; Path=/; HttpOnly; SameSite=Strict"
+            # Max-Age: caduca sola. Secure: por el túnel (HTTPS) no viaja nunca en claro.
+            cookie = (f"{COOKIE_SESION}={token}; Path=/; HttpOnly; SameSite=Strict; "
+                      f"Max-Age={DURACION_SESION_S}" + ("; Secure" if self._por_tunel() else ""))
             return self._json({"ok": True, "admin": True}, cookies=[cookie])
         if partes.path == "/api/logout":
             self.app.logout(self._token())
@@ -599,6 +731,13 @@ class Manejador(BaseHTTPRequestHandler):
         if not foto:
             return self._fallo(HTTPStatus.BAD_REQUEST, "imagen_invalida", "No se ha recibido ninguna foto")
         es_admin = self._es_admin()
+        # Cada operación con foto gasta CPU (detector + ArcFace): límite por IP para
+        # que nadie sature el servidor ni barra la BD con miles de fotos. El admin no.
+        if not es_admin:
+            espera = self.app.peticiones_ip.consumir(self._ip())
+            if espera:
+                return self._fallo(HTTPStatus.TOO_MANY_REQUESTS, "demasiadas_peticiones",
+                                   f"Demasiadas peticiones seguidas. Espera {espera} s.")
         # Inscribir (modificar la BD) es del admin. Un usuario solo puede mientras la
         # inscripción abierta temporal esté activa y SOLO para personas nuevas.
         if operacion == "inscribir" and not es_admin:
@@ -634,14 +773,39 @@ class Manejador(BaseHTTPRequestHandler):
         self._fallo(HTTPStatus.NOT_FOUND, "no_encontrado", f"No existe {ruta}")
 
 
+class ServidorLens(ThreadingHTTPServer):
+    """ThreadingHTTPServer con tope de conexiones simultáneas: cada conexión es un hilo,
+    y sin tope un atacante podría abrir miles (y quedarse callado) hasta tumbarlo."""
+
+    daemon_threads = True
+
+    def __init__(self, *args, max_conexiones: int = MAX_CONEXIONES, **kwargs):
+        self._cupo = threading.BoundedSemaphore(max_conexiones)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self._cupo.acquire(blocking=False):
+            self.shutdown_request(request)  # lleno: se cierra sin atender
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._cupo.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._cupo.release()
+
+
 def crear_servidor(ruta_config: Path, host: str = "127.0.0.1", puerto: int = 8000,
                    dominios_extra: tuple[str, ...] = (), admin_pass: str | None = None,
                    inscripcion_abierta_min: float | None = None) -> ThreadingHTTPServer:
     app = Aplicacion(ruta_config, admin_pass=admin_pass, inscripcion_abierta_min=inscripcion_abierta_min)
     manejador = type("ManejadorLens", (Manejador,), {"app": app, "dominios_extra": tuple(dominios_extra)})
-    servidor = ThreadingHTTPServer((host, puerto), manejador)
-    servidor.daemon_threads = True
-    return servidor
+    return ServidorLens((host, puerto), manejador)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -658,6 +822,14 @@ def main(argv: list[str] | None = None) -> int:
                         help=f"PIN de administrador (si no, {VARIABLE_ADMIN} o uno aleatorio que se imprime)")
     args = parser.parse_args(argv)
 
+    pin = args.admin_pass or os.environ.get(VARIABLE_ADMIN)
+    motivo = pin_debil(pin) if pin else None
+    if motivo and args.tunel:
+        print(f"El PIN de administrador {motivo}: con --tunel la web es pública y se podría adivinar.\n"
+              f"Usa uno de {LONGITUD_MINIMA_PIN}+ caracteres (o no pases ninguno y se genera uno aleatorio).")
+        return 1
+    if motivo:
+        print(f"AVISO: el PIN de administrador {motivo}. Vale en local; NO lo uses con --tunel.")
     if args.tunel and shutil.which("cloudflared") is None:
         print("No se encuentra cloudflared. En macOS: brew install cloudflared")
         return 1
@@ -722,7 +894,7 @@ def abrir_tunel(url_local: str) -> subprocess.Popen:
             if encontrada and not avisado:
                 avisado = True
                 print(f"\n  URL pública (Cloudflare Tunnel): {encontrada.group(0)}\n"
-                      "  Cualquiera con esta URL puede usar la web y editar la base de datos.\n", flush=True)
+                      "  Cualquiera con esta URL puede verificar e identificar; editar la BD exige el PIN.\n", flush=True)
             elif "ERR" in linea and not avisado:
                 print(f"[cloudflared] {linea.strip()}", flush=True)
 

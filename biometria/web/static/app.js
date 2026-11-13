@@ -124,6 +124,8 @@ const ERRORES = {
   nombre_ocupado: ["comparacion", "Ese nombre ya existe", "Elige otro nombre. Solo el administrador puede añadir fotos a personas que ya están en la base de datos."],
   inscripcion_llena: ["comparacion", "Ya no caben más personas ahora", "Se ha alcanzado el máximo de personas que se pueden añadir en este modo temporal."],
   demasiados_intentos: ["comparacion", "Demasiados intentos seguidos", "Se han hecho muchas comparaciones en poco tiempo. Es una protección contra el ajuste automático de plantillas. Espera un momento y vuelve a intentarlo."],
+  template_no_firmado: ["comparacion", "Plantilla no firmada", "El sistema solo acepta plantillas que ha generado él mismo."],
+  demasiadas_peticiones: ["carga", "Demasiadas peticiones seguidas", "Espera un minuto y vuelve a intentarlo."],
   integridad_bd: ["comparacion", "¡La base de datos ha sido manipulada!", "La firma HMAC no cuadra: alguien ha modificado bd.csv fuera del sistema. Por seguridad no se usa."],
   bd_corrupta: ["comparacion", "La base de datos está dañada", null],
   configuracion_invalida: ["carga", "Error de configuración del servidor", null],
@@ -1301,8 +1303,11 @@ function pintarResultado(respuesta, nombre) {
           medidor(r.puntuacion, r.umbral, "si"));
       } else {
         anadir(
-          veredicto("duda", "Persona desconocida", "No está en la base de datos",
-            "La foto no coincide con nadie guardado."),
+          r.ambiguo
+            ? veredicto("duda", "No se puede decidir", "Se parece casi igual a dos personas",
+                "Por seguridad no se identifica a nadie (gemelos o personas muy parecidas).")
+            : veredicto("duda", "Persona desconocida", "No está en la base de datos",
+                "La foto no coincide con nadie guardado."),
           el("div", { class: "caras caras--sola" }, figuraCara(respuesta.retrato, "La que has subido", "Tu foto")),
           medidor(r.puntuacion, r.umbral, "no"));
       }
@@ -1324,7 +1329,10 @@ function pintarResultado(respuesta, nombre) {
     } else {
       const mejor = r.candidatos?.[0]; // solo si supera el umbral de parecido
       anadir(
-        veredicto("duda", "Persona desconocida", "No está en la base de datos",
+        r.ambiguo
+          ? veredicto("duda", "No se puede decidir", "Empate entre las dos más parecidas",
+              `La primera supera el umbral, pero la segunda está a menos de ${pct(r.margen)}: podría ser cualquiera de las dos (gemelos, dobles). Por seguridad: desconocido.`)
+          : veredicto("duda", "Persona desconocida", "No está en la base de datos",
           mejor ? `Nadie supera el umbral. La más parecida es ${mejor.id}, pero solo al ${pct(mejor.puntuacion)}.`
                 : `Nadie se le parece: la persona más cercana solo llega al ${pct(r.puntuacion)}.`),
         mejor ? el("div", { class: "caras" },
