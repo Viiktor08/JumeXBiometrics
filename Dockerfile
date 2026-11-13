@@ -1,10 +1,12 @@
 # Imagen lista para usar del sistema JumeXBiometrics.
 #
 #   docker build -t jumex-biometrics .
-#   docker run --rm -v "$(pwd)/data:/app/data" jumex-biometrics <comando> [args]
+#   docker run --rm -v "$(pwd)/data:/app/data" -v "$HOME/.jumex:/home/biometria/.jumex" \
+#       jumex-biometrics <comando> [args]
 #
-# La base de datos (data/bd.csv) y la clave HMAC viven en el volumen /app/data,
-# no dentro de la imagen.
+# La base de datos (data/bd.csv) vive en el volumen /app/data y la clave maestra
+# en OTRO volumen (~/.jumex), igual que fuera de Docker: quien lea o escriba los
+# datos no tiene la clave. Ninguna de las dos va dentro de la imagen.
 
 FROM python:3.11-slim
 
@@ -34,10 +36,11 @@ COPY . .
 
 # Usuario sin privilegios: si alguien explota el sistema no obtiene root en el contenedor
 RUN useradd --create-home --uid 1000 biometria \
-    && mkdir -p /app/data \
-    && chown -R biometria:biometria /app/data
+    && mkdir -p /app/data /home/biometria/.jumex \
+    && chmod 700 /home/biometria/.jumex \
+    && chown -R biometria:biometria /app/data /home/biometria/.jumex
 USER biometria
 
-VOLUME ["/app/data"]
+VOLUME ["/app/data", "/home/biometria/.jumex"]
 
 ENTRYPOINT ["python", "-m", "biometria"]

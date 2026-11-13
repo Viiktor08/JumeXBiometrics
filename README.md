@@ -79,7 +79,7 @@ Son los **9 métodos que pide el enunciado**. Además:
 - **Base de datos en CSV** con firma HMAC por fila, cifrado opcional de los templates y escritura atómica.
 - **JumeX Lens**: web para verificar, identificar (incluso a varias personas en una foto), inscribir y editar la base de datos, con la animación de cada paso del pipeline. Las fotos se pueden subir o **hacer en el momento con la cámara**.
 - **Demo de cámara** en directo y varios scripts para revisar el detector y comparar caras.
-- **Dockerfile** y **195 tests**.
+- **Dockerfile** y **241 tests**.
 
 ---
 
@@ -94,7 +94,7 @@ python3 -m venv .venv && source .venv/bin/activate   # en Windows: .venv\Scripts
 pip install -r requirements-dev.txt
 python scripts/descargar_modelos.py                   # baja los modelos y verifica su SHA256
 python -m biometria                                   # comprueba que todo está en su sitio
-pytest -q                                             # 195 tests
+pytest -q                                             # 241 tests
 ```
 
 > Si el repo está en OneDrive o Dropbox, crea el entorno virtual **fuera** de la
@@ -104,8 +104,8 @@ pytest -q                                             # 195 tests
 
 ```bash
 docker build -t jumex-biometrics .
-docker run --rm -v "$(pwd)/data:/app/data" jumex-biometrics                # estado del entorno
-docker run --rm -v "$(pwd)/data:/app/data" jumex-biometrics inscribir --id "Ana López" --foto data/fotos/ana.jpg
+docker run --rm -v "$(pwd)/data:/app/data" -v "$HOME/.jumex:/home/biometria/.jumex" jumex-biometrics                # estado del entorno
+docker run --rm -v "$(pwd)/data:/app/data" -v "$HOME/.jumex:/home/biometria/.jumex" jumex-biometrics inscribir --id "Ana López" --foto data/fotos/ana.jpg
 docker run --rm --entrypoint python jumex-biometrics -m pytest -q          # tests dentro del contenedor
 ```
 
@@ -125,7 +125,7 @@ cd JumeXBiometrics
 python3 -m venv ~/.venvs/jumex && source ~/.venvs/jumex/bin/activate
 pip install -r requirements-dev.txt
 python scripts/descargar_modelos.py          # ~290 MB la primera vez (ArcFace); verifica SHA256
-pytest -q                                    # 200 tests
+pytest -q                                    # 241 tests
 ```
 
 - El repositorio es **privado**: hay que tener acceso (Settings → Collaborators).
@@ -139,8 +139,13 @@ pytest -q                                    # 200 tests
 ```bash
 python scripts/preparar_dataset.py Dataset                          # crea data/dataset_ids.csv
 python scripts/inscribir_csv.py data/dataset_ids.csv --config config_lens.yaml
-python -m biometria.web --admin-pass TU_PIN                         # http://127.0.0.1:8000
+python -m biometria.web --admin-pass TU_PIN_LARGO                   # http://127.0.0.1:8000
 ```
+
+- La **clave** de cada BD se crea sola en `~/.jumex/` (fuera del repo). Si teníais
+  una BD de antes con la clave en `data/`, pasadla con
+  `python scripts/proteger_bd.py --config config_lens.yaml --clave-antigua data/lens/clave_hmac.key`
+  (mueve la clave, cifra la BD y crea el sello).
 
 - Trabajad en **ramas** (`git switch -c mi-cambio`) y subid con `git push -u origin
   mi-cambio`; no hagáis `push --force` sobre ramas compartidas.
@@ -361,15 +366,22 @@ colar a nadie ni borrar a nadie sin que se note:
 - **Escritura atómica:** se escribe en un fichero temporal, se fuerza a disco y se
   renombra. Un fallo a mitad no deja un CSV a medias.
 - **La clave** viene de la variable de entorno `BIOMETRIA_HMAC_KEY` (mínimo 32
-  caracteres) o, si no existe, del fichero `data/clave_hmac.key`, que se genera
-  solo la primera vez que se inscribe a alguien (64 caracteres aleatorios, permisos
-  `600`). De esa clave maestra se derivan, con HKDF, **dos claves independientes**:
-  una para las firmas y otra para el cifrado. **Si se pierde la clave, la base de
-  datos no se puede verificar** y hay que volver a inscribir.
-- **Cifrado opcional** (`bd.cifrar_templates: true`): los templates se cifran con
+  caracteres) o, si no existe, del fichero `bd.ruta_clave`: **`~/.jumex/clave_bd.key`**
+  (CLI) y **`~/.jumex/clave_lens.key`** (web), **fuera de `data/` y del
+  repositorio**, para que quien pueda leer o escribir la BD no tenga también la
+  clave. Se genera sola la primera vez que se inscribe a alguien (64 caracteres
+  aleatorios, permisos `600`). De esa clave maestra se derivan, con HKDF, **cuatro
+  claves independientes**: firmas de la BD, cifrado, firma de templates y sello
+  anti-rollback. **Si se pierde la clave, la base de datos no se puede verificar**
+  y hay que volver a inscribir.
+- **Cifrado** (`bd.cifrar_templates: true`, activado): los templates se cifran con
   AES-256-GCM; el `id` va como dato asociado, de modo que un template cifrado no
-  se puede mover a otra persona. Es compatible con una BD ya creada (cada fila dice
-  con su prefijo `f32:`/`gcm:` cómo leerla).
+  se puede mover a otra persona. Cada fila dice con su prefijo `f32:`/`gcm:` cómo
+  leerla; `scripts/proteger_bd.py` cifra una BD que estaba en claro.
+- **Sello anti-rollback** (`bd.anti_rollback: true`): junto a la clave se guarda el
+  SHA-256 firmado del último CSV escrito. Volver a una copia antigua o borrar el
+  CSV da `integridad_bd`.
+- **Bloqueo de fichero** (`flock`): dos procesos que escriben a la vez no se pisan.
 - **Validación al leer:** cada template se comprueba con su extractor
   (dimensión, valores finitos, rangos). Una BD creada con otro extractor se
   rechaza con un mensaje claro, en vez de dar puntuaciones absurdas.
@@ -389,16 +401,9 @@ persona. Cada muestra tiene una *clave estable* (los 16 primeros caracteres del
 SHA-256 de su campo `template`), sin necesidad de otra columna; la web la usa
 para asociar a cada muestra su foto.
 
-**Qué NO detecta la integridad** (se documentará en el modelo de amenazas):
-- **Volver a una copia antigua completa y válida** del CSV (*rollback*): sigue
-  teniendo firmas correctas.
-- **Borrar el fichero entero**: equivale a una base de datos vacía. Es una
-  denegación de servicio, pero no permite suplantar a nadie.
-- Quien tenga la **clave** puede firmar lo que quiera.
-- Con el cifrado desactivado (el valor por defecto), **quien pueda leer el CSV ve
-  los templates**. Y con el cifrado activado pero la clave en el mismo equipo
-  (`data/clave_hmac.key`), la protección es limitada; es mejor pasar la clave por
-  la variable de entorno.
+**Qué NO protege** (ver [`THREAT_MODEL.md`](THREAT_MODEL.md), paso 6): quien
+tenga la **clave** (o pueda escribir en `~/.jumex/`) puede firmar y cifrar lo que
+quiera. En Windows no hay bloqueo de fichero.
 
 ### Inscribir, verificar e identificar
 
@@ -759,7 +764,15 @@ BIOMETRIA_ADMIN_PASS=TU_PIN python -m biometria.web
   navegador a un permiso previo (*preflight*) que nunca se concede, y así otra web
   abierta en el navegador no puede usar la API (CSRF).
 - La sesión de admin va en una cookie **`HttpOnly; SameSite=Strict`** (no accesible
-  desde JavaScript); el PIN se compara en tiempo constante.
+  desde JavaScript), **caduca a las 2 h** y por el túnel lleva `Secure`; el PIN se
+  compara en tiempo constante.
+- **Fuerza bruta del PIN:** 5 fallos desde una IP en 15 min bloquean esa IP; 20
+  fallos en total bloquean el login para todos. Con `--tunel` no arranca con un
+  PIN débil (menos de 8 caracteres, común, repetido o secuencial).
+- **Límite por IP:** 60 operaciones con foto por minuto (el admin no tiene límite);
+  timeout de 20 s por conexión y como mucho 32 conexiones a la vez (*slowloris*).
+- **Verificar no revela quién está inscrito:** a un usuario, un nombre que no
+  existe le da un rechazo normal, no "no inscrito".
 - Rechaza peticiones cuyo **`Host`** no sea localhost (*DNS rebinding*).
 - El tamaño de la foto se comprueba **antes de leer el cuerpo**; solo se sirven los
   ficheros de la carpeta `static/`; el navegador recibe una *Content-Security-Policy*
@@ -804,8 +817,9 @@ configuración se **valida**: un valor fuera de rango da un error claro
 | `extractor` | `nombre` | `arcface` | `arcface`, `sface` o `lbp` |
 | | `parametros` | `modelo: models/arcface_w600k_r50.onnx, voltear: true` | Parámetros del extractor. ArcFace: `modelo`, `voltear` (sumar la cara volteada). SFace: `modelo`. LBP: `radio`, `puntos`, `rejilla` ([columnas, filas]) |
 | `bd` | `ruta` | `data/bd.csv` | Dónde se guarda la base de datos |
-| | `ruta_clave` | `data/clave_hmac.key` | Fichero de la clave (si no hay variable de entorno) |
-| | `cifrar_templates` | `false` | Cifrar los templates con AES-GCM |
+| | `ruta_clave` | `~/.jumex/clave_bd.key` | Fichero de la clave (si no hay variable de entorno). Fuera de `data/` |
+| | `cifrar_templates` | `true` | Cifrar los templates con AES-GCM |
+| | `anti_rollback` | `true` | Sello junto a la clave: detecta volver a una BD antigua o borrarla |
 | | `agregacion` | `max` | `max` o `media` de las muestras de una persona |
 | `umbrales` | `verificacion` | 0,35 | Puntuación mínima para aceptar al verificar |
 | | `identificacion` | 0,40 | Puntuación mínima para no devolver "desconocido" |
@@ -817,6 +831,9 @@ configuración se **valida**: un valor fuera de rango da un error claro
 | | `decimales_puntuacion_t` | 2 | Decimales a los que se redondea la puntuación que devuelven los `_t` (0 = sin redondeo). Contra el hill-climbing |
 | | `max_intentos_t` | 50 | Máx. comparaciones `_t` por id en la ventana (0 = sin límite). Contra el hill-climbing |
 | | `ventana_intentos_s` | 60 | Ventana del límite anterior, en segundos |
+| | `exigir_firma_t` | `true` | Los `_t` **rechazan** templates sin firma válida de este sistema (`template_no_firmado`). `false` = solo avisan con `fiable` |
+| | `margen_identificacion` | 0,10 | En identificar, ventaja mínima del 1.º sobre el 2.º; si no, desconocido (`ambiguo`). Contra gemelos y dobles |
+| | `cara_en_sd` | `true` | Los `_sd` comprueban con YuNet que la imagen es una cara (sin alinear) |
 
 **Variables de entorno:** `BIOMETRIA_CONFIG` (configuración), `BIOMETRIA_HMAC_KEY`
 (clave de la BD) y `BIOMETRIA_ADMIN_PASS` (PIN de administrador de la web).
@@ -837,27 +854,29 @@ recalibrarlos**: cada técnica puntúa en una escala distinta.
 
 El enunciado pide que cada grupo evalúe su sistema suponiendo que **un atacante se
 salta alguna parte, lee la base de datos o incluso escribe en ella**. El análisis
-completo, con cada ataque probado (`scripts/atacar.py`), está en
-[**`THREAT_MODEL.md`**](THREAT_MODEL.md). Resumen de lo que hace el sistema:
+completo, con cada defensa medida y probada con tests, está en
+[**`THREAT_MODEL.md`**](THREAT_MODEL.md), que también recoge **lo que no se para**
+(riesgos aceptados). Resumen:
 
 | Amenaza | Qué hace el sistema |
 |---|---|
 | **Modifica o manipula `bd.csv`** (cambiar, copiar entre personas, borrar, duplicar o reordenar filas) | Lo detecta: firma HMAC por fila con su posición y el total → `integridad_bd`. No se puede inscribir encima de una BD manipulada |
 | **Envenenar la inscripción** (añadir mi cara como muestra de la víctima) | ✅ Se rechaza: la muestra nueva debe parecerse a las de esa persona (`coherencia_muestra`) → `muestra_incoherente` |
 | **Cualquiera inscribe/borra/lee por la web** | ✅ Dos roles: usuario (verificar/identificar) y **admin con PIN**; la BD solo la ve y toca el admin |
-| **Se salta el extractor** (`_t`) con un template fabricado | ✅ El sistema **firma** los templates que genera; `_t` marca `fiable: true/false/null` (sigue aceptándolos, como pide el enunciado, pero avisa) |
-| **Hill-climbing** (ajustar un template probándolo hasta colarlo) | ✅ La puntuación de `_t` se **redondea** y hay **límite de intentos** por id → `demasiados_intentos`. El ataque pasa de ~20 000 a <50 intentos útiles |
-| **Lee `bd.csv`** | Ve los templates (con el cifrado desactivado). Cifrado AES-256-GCM opcional ⏳ (paso 6) |
-| **Se salta el detector** (`_sd`) | Se acepta cualquier imagen que pase la nitidez: superficie de ataque conocida ⏳ (paso 5) |
+| **Se salta el extractor** (`_t`) con un template fabricado o copiado de la BD | ✅ El sistema **firma** los templates que genera (`extraer` crea el `.sig`) y los `_t` **rechazan** los que no traen una firma válida → `template_no_firmado` |
+| **Hill-climbing** (ajustar un template probándolo hasta colarlo) | ✅ Cada variación pierde la firma y se rechaza sin dar puntuación. Además: redondeo y límite de intentos (este, solo dentro del servidor web) |
+| **Gemelos y dobles** | ✅ Si el 1.º y el 2.º candidato están a menos de 0,10, desconocido (`ambiguo`). ⚠️ No sirve si el gemelo no está inscrito |
+| **Lee `bd.csv`** | ✅ Templates cifrados con AES-256-GCM; la clave está fuera de `data/` |
+| **Restaura una BD antigua o la borra** | ✅ Sello anti-rollback junto a la clave → `integridad_bd` |
+| **Se salta el detector** (`_sd`) con algo que no es una cara | ✅ YuNet comprueba que hay una cara → `sin_cara` |
+| **Fuerza bruta del PIN, saturar o enumerar la web** | ✅ Bloqueo de PIN, sesión que caduca, límites por IP, timeouts, verificar sin revelar inscritos |
 | **Imágenes malintencionadas** | Límites de bytes y píxeles (doble), decodificación solo mediante OpenCV, nunca se cargan objetos con pickle |
 | **Nombres malintencionados** | Validación estricta de ids (sin saltos de línea, sin fórmulas de Excel, normalizados) |
-| **Foto de una foto** (presentación) | ⏳ Sin detección de vivacidad todavía (paso 7) |
+| **Foto de una foto, deepfake, máscara** | ⚠️ Sin detección de vivacidad: riesgo aceptado y documentado (paso 7) |
 
-Las contramedidas de software están en la sección `defensa:` de la configuración
-y **se pueden desactivar** (poner a 0) para medir el sistema sin ellas o no romper
-la interoperabilidad del enunciado. **Pendientes** (⏳): cifrado por defecto y
-protección de rollback (paso 6), comprobar cara en `_sd` (paso 5) y vivacidad
-(paso 7). Ver [`THREAT_MODEL.md`](THREAT_MODEL.md).
+Las contramedidas están en las secciones `bd:` y `defensa:` de la configuración y
+**se pueden desactivar** para medir el sistema sin ellas. `python -m biometria bd`
+enseña cuáles están activas, y `scripts/medir_defensas.py` mide su coste en LFW.
 
 ---
 
@@ -931,12 +950,11 @@ Algunos tests necesitan los modelos (`descargar_modelos.py`) y red la primera ve
 | extra | `web`, `web-v2` | SFace, JumeX Lens, varias caras, ficha editable, Cloudflare Tunnel | ✅ |
 | — | `arcface` | **ArcFace como extractor principal**, umbrales calibrados (`evaluar.py`), migración de la BD, cámara en la web, "los más parecidos" filtrados | ✅ |
 | 6 | `inscripcion-evaluacion` | Inscripción masiva de las 51 personas; FAR/FRR/EER, curvas DET/ROC y CMC | ⏳ |
-| 7 | `seguridad` | `THREAT_MODEL.md` y contramedidas | ⏳ |
+| 7 | `seguridad` | `THREAT_MODEL.md` y contramedidas (pasos 1–8 y riesgos aceptados) | ✅ |
 
 **Pendiente:**
 - **Las 50 fotos del profesor** y nuestra persona número 51 (se puede capturar con la cámara de la web o con `python -m biometria.camara`), y **confirmar con ellas los umbrales** calibrados en LFW.
 - **El resto de la evaluación** (fase 6): `scripts/evaluar.py` ya da FAR/FRR/EER y rank-1; faltan las **curvas** DET/ROC y CMC.
-- **El modelo de amenazas** (fase 7).
 - **Probar el Docker** (no se ha construido en la máquina de desarrollo).
 
 **Limitaciones conocidas:**
@@ -995,7 +1013,7 @@ Decisiones tomadas donde el enunciado es ambiguo o deja libertad:
 
 - **`Address already in use` al arrancar la web:** queda un servidor anterior abierto. En macOS el proceso se llama `Python` (con mayúscula): `lsof -nP -iTCP:8000 -sTCP:LISTEN` te dice su PID y `kill <PID>` lo cierra. O arranca en otro puerto con `--puerto 8080`.
 - **`CERTIFICATE_VERIFY_FAILED` al descargar modelos en macOS:** el Python de python.org no trae certificados. Ejecuta `/Applications/Python\ 3.11/Install\ Certificates.command` o lanza el script con `SSL_CERT_FILE=/etc/ssl/cert.pem`.
-- **`integridad_bd` sin haber tocado nada:** la clave no es la que firmó la BD (se perdió `data/clave_hmac.key`, o `BIOMETRIA_HMAC_KEY` es otra). La BD no se puede recuperar sin su clave: hay que inscribir de nuevo.
+- **`integridad_bd` sin haber tocado nada:** la clave no es la que firmó la BD (se perdió `~/.jumex/clave_*.key`, o `BIOMETRIA_HMAC_KEY` es otra). Si dice **rollback**, el CSV no es el último que escribió el sistema: alguien lo ha sustituido por una copia. La BD no se puede recuperar sin su clave: hay que inscribir de nuevo.
 - **Un error dice que la BD se creó con otro extractor:** los templates guardados no tienen la dimensión del extractor actual (p. ej. una BD de SFace o LBP abierta con ArcFace). Para la web, `python scripts/migrar_extractor.py` la rehace a partir de las fotos de la galería (con respaldo). Para `data/bd.csv`, que no guarda fotos, hay que inscribir de nuevo.
 - **La cámara de la web no se abre:** comprueba que entras por `http://127.0.0.1:8000` o `localhost` (no por la IP de la red local) o por la URL `https` del túnel; que no la tiene ocupada otra aplicación (Zoom, Teams…); y que el navegador tiene permiso (candado de la barra de direcciones).
 - **La demo `python -m biometria.camara` no abre la cámara:** en macOS hay que dar permiso a la terminal o a VS Code en *Ajustes del Sistema → Privacidad y seguridad → Cámara*. Docker en macOS no ve la cámara.
