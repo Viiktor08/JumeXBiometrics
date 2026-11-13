@@ -447,3 +447,72 @@ def test_usuario_identifica_pero_sin_foto_ni_candidatos(servidor, ruta_astronaut
     # Verificar como usuario: aceptado, sin foto de la BD
     _, r, _ = peticion(servidor, "POST", "/api/verificar?id=Eileen%20Collins", foto)
     assert r["resultado"]["aceptado"] is True and "foto" not in r["resultado"]
+
+
+# --- Inscripción abierta temporal (el "+") ---------------------------------------------------
+
+def _servidor_abierto(config_web, minutos):
+    srv = crear_servidor(config_web, "127.0.0.1", 0, admin_pass=PIN_ADMIN, inscripcion_abierta_min=minutos)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def test_el_mas_no_existe_por_defecto(servidor, ruta_astronauta):
+    """Sin la opción de arranque, un usuario sigue sin poder inscribir."""
+    _, estado, _ = peticion(servidor, "GET", "/api/estado")
+    assert estado["inscripcion_abierta"] is False and estado["inscripcion_segundos"] == 0
+    estado_http, r, _ = peticion(servidor, "POST", "/api/inscribir?id=Amigo", ruta_astronauta.read_bytes())
+    assert estado_http == 403 and r["error"]["error"] == "requiere_admin"
+
+
+def test_inscripcion_abierta_solo_permite_personas_nuevas(config_web, ruta_astronauta):
+    srv = _servidor_abierto(config_web, 5)
+    try:
+        puerto = srv.server_address[1]
+        foto = ruta_astronauta.read_bytes()
+        _, estado, _ = peticion(puerto, "GET", "/api/estado")
+        assert estado["inscripcion_abierta"] is True and 0 < estado["inscripcion_segundos"] <= 300
+
+        # Un usuario (sin PIN) añade una persona NUEVA
+        e, r, _ = peticion(puerto, "POST", "/api/inscribir?id=Amigo%20Uno", foto)
+        assert e == 200 and r["ok"] and r["resultado"]["nueva_persona"]
+        assert "foto" not in r["resultado"]  # sigue sin ver fotos de la BD
+
+        # ...pero NO puede añadir muestras a alguien que existe y no es del modo abierto
+        cab = {"Cookie": cookie_admin(puerto)}
+        peticion(puerto, "POST", "/api/inscribir?id=Persona%20Real", foto, cab)  # la inscribe el admin
+        e, r, _ = peticion(puerto, "POST", "/api/inscribir?id=Persona%20Real", foto)
+        assert e == 403 and r["error"]["error"] == "nombre_ocupado"
+        # Las demás acciones de admin siguen cerradas
+        assert peticion(puerto, "GET", "/api/personas")[0] == 403
+        assert peticion(puerto, "DELETE", "/api/personas?id=Amigo%20Uno")[0] == 403
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_inscripcion_abierta_tiene_tope(config_web, ruta_astronauta):
+    srv = _servidor_abierto(config_web, 5)
+    try:
+        puerto = srv.server_address[1]
+        app = srv.RequestHandlerClass.app
+        app._inscritos_abiertos.update(f"Relleno {i}" for i in range(app.MAX_INSCRITOS_ABIERTOS))
+        e, r, _ = peticion(puerto, "POST", "/api/inscribir?id=Uno%20Mas", ruta_astronauta.read_bytes())
+        assert e == 403 and r["error"]["error"] == "inscripcion_llena"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_inscripcion_abierta_caduca(config_web, ruta_astronauta):
+    srv = _servidor_abierto(config_web, 5)
+    try:
+        puerto = srv.server_address[1]
+        app = srv.RequestHandlerClass.app
+        app._abierta_hasta = 1.0  # ya pasó (time.monotonic() es mucho mayor)
+        assert peticion(puerto, "GET", "/api/estado")[1]["inscripcion_abierta"] is False
+        e, r, _ = peticion(puerto, "POST", "/api/inscribir?id=Tarde", ruta_astronauta.read_bytes())
+        assert e == 403 and r["error"]["error"] == "requiere_admin"
+    finally:
+        srv.shutdown()
+        srv.server_close()

@@ -87,7 +87,11 @@ class Aplicacion:
       - admin (con contraseña): además ve la base de datos, inscribe, borra y edita.
     """
 
-    def __init__(self, ruta_config: Path, admin_pass: str | None = None):
+    # Tope de personas que el público puede añadir mientras la inscripción está abierta
+    MAX_INSCRITOS_ABIERTOS = 20
+
+    def __init__(self, ruta_config: Path, admin_pass: str | None = None,
+                 inscripcion_abierta_min: float | None = None):
         self.cfg = cargar_config(ruta_config)
         self.sistema = SistemaBiometrico(self.cfg)
         self.sistema.detector  # carga YuNet ya: si falta el modelo, falla al arrancar
@@ -98,6 +102,11 @@ class Aplicacion:
         self.admin_pass = admin_pass or os.environ.get(VARIABLE_ADMIN) or secrets.token_urlsafe(9)
         self.admin_pass_generada = not (admin_pass or os.environ.get(VARIABLE_ADMIN))
         self._sesiones: set[str] = set()  # tokens de sesión admin vivos (en memoria)
+        # Inscripción abierta TEMPORAL: cualquiera puede añadir personas NUEVAS (el "+")
+        # hasta `_abierta_hasta`. Sin la opción de arranque no existe; caduca sola.
+        self._abierta_hasta = (time.monotonic() + inscripcion_abierta_min * 60
+                               if inscripcion_abierta_min and inscripcion_abierta_min > 0 else 0.0)
+        self._inscritos_abiertos: set[str] = set()  # ids añadidos por el público en esta ejecución
         try:
             self.galeria.migrar(self.sistema.bd.claves_por_id())
         except ErrorBiometrico:
@@ -121,6 +130,31 @@ class Aplicacion:
 
     def es_admin(self, token: str | None) -> bool:
         return bool(token) and token in self._sesiones
+
+    # ------------------------------------------------------------------ #
+    # Inscripción abierta temporal (el "+")
+    # ------------------------------------------------------------------ #
+    def segundos_inscripcion_abierta(self) -> int:
+        """Segundos que le quedan a la ventana de inscripción abierta (0 = cerrada)."""
+        return max(0, int(self._abierta_hasta - time.monotonic())) if self._abierta_hasta else 0
+
+    def puede_inscribir_publico(self, id_persona: str) -> tuple[bool, str]:
+        """¿Puede un NO admin inscribir a `id_persona` ahora? Devuelve (ok, motivo).
+
+        Solo personas NUEVAS: añadir muestras a alguien que ya está inscrito (las
+        49 reales) sigue siendo solo del admin, para no poder manipularlas."""
+        if self.segundos_inscripcion_abierta() <= 0:
+            return False, "requiere_admin"
+        try:
+            ya_existe = validar_id(id_persona) in self.sistema.bd.por_id()
+        except ErrorBiometrico:
+            return True, ""  # id inválido o BD rota: que el flujo normal dé el error concreto
+        if ya_existe and validar_id(id_persona) not in self._inscritos_abiertos:
+            return False, "nombre_ocupado"
+        if (validar_id(id_persona) not in self._inscritos_abiertos
+                and len(self._inscritos_abiertos) >= self.MAX_INSCRITOS_ABIERTOS):
+            return False, "inscripcion_llena"
+        return True, ""
 
     # ------------------------------------------------------------------ #
     # Fotos de la galería
@@ -151,6 +185,8 @@ class Aplicacion:
             "agregacion": self.cfg.bd.agregacion,
             "max_muestras": self.cfg.limites.max_muestras_por_id,
             "admin": admin,
+            "inscripcion_abierta": self.segundos_inscripcion_abierta() > 0,
+            "inscripcion_segundos": self.segundos_inscripcion_abierta(),
         }
         # Los umbrales y el recuento de personas son información del sistema que solo
         # ve el admin: a un usuario no le decimos cuánta gente hay ni con qué margen.
@@ -542,9 +578,6 @@ class Manejador(BaseHTTPRequestHandler):
         operacion = partes.path.removeprefix("/api/")
         if operacion not in ("analizar", "verificar", "identificar", "inscribir"):
             return self._fallo(HTTPStatus.NOT_FOUND, "no_encontrado", f"No existe {partes.path}")
-        # Inscribir (modificar la BD) es solo del admin; analizar/verificar/identificar, de cualquiera
-        if operacion == "inscribir" and not self._exige_admin():
-            return
         consulta = parse_qs(partes.query)
 
         id_persona = None
@@ -562,7 +595,23 @@ class Manejador(BaseHTTPRequestHandler):
                 return self._fallo(HTTPStatus.BAD_REQUEST, "caja_invalida", "caja debe ser x,y,ancho,alto")
         if not foto:
             return self._fallo(HTTPStatus.BAD_REQUEST, "imagen_invalida", "No se ha recibido ninguna foto")
-        self._json(self.app.operar(operacion, id_persona, foto, region, admin=self._es_admin()))
+        es_admin = self._es_admin()
+        # Inscribir (modificar la BD) es del admin. Un usuario solo puede mientras la
+        # inscripción abierta temporal esté activa y SOLO para personas nuevas.
+        if operacion == "inscribir" and not es_admin:
+            permitido, motivo = self.app.puede_inscribir_publico(id_persona)
+            if not permitido:
+                mensajes = {
+                    "requiere_admin": "Inscribir es solo del administrador. Introduce el PIN de administrador.",
+                    "nombre_ocupado": "Ese nombre ya está en la base de datos. Elige otro: solo el administrador "
+                                      "puede añadir fotos a personas que ya existen.",
+                    "inscripcion_llena": "Se ha alcanzado el máximo de personas que se pueden añadir ahora.",
+                }
+                return self._fallo(HTTPStatus.FORBIDDEN, motivo, mensajes[motivo])
+        respuesta = self.app.operar(operacion, id_persona, foto, region, admin=es_admin)
+        if operacion == "inscribir" and not es_admin and respuesta.get("ok") and respuesta.get("resultado"):
+            self.app._inscritos_abiertos.add(respuesta["resultado"]["id"])  # cuenta para el tope
+        self._json(respuesta)
 
     def do_DELETE(self) -> None:
         if not self._host_valido():
@@ -583,8 +632,9 @@ class Manejador(BaseHTTPRequestHandler):
 
 
 def crear_servidor(ruta_config: Path, host: str = "127.0.0.1", puerto: int = 8000,
-                   dominios_extra: tuple[str, ...] = (), admin_pass: str | None = None) -> ThreadingHTTPServer:
-    app = Aplicacion(ruta_config, admin_pass=admin_pass)
+                   dominios_extra: tuple[str, ...] = (), admin_pass: str | None = None,
+                   inscripcion_abierta_min: float | None = None) -> ThreadingHTTPServer:
+    app = Aplicacion(ruta_config, admin_pass=admin_pass, inscripcion_abierta_min=inscripcion_abierta_min)
     manejador = type("ManejadorLens", (Manejador,), {"app": app, "dominios_extra": tuple(dominios_extra)})
     servidor = ThreadingHTTPServer((host, puerto), manejador)
     servidor.daemon_threads = True
@@ -598,6 +648,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-abrir", action="store_true", help="no abrir el navegador")
     parser.add_argument("--tunel", action="store_true",
                         help="publica la web con un túnel de Cloudflare (necesita cloudflared)")
+    parser.add_argument("--inscripcion-abierta", type=float, nargs="?", const=60.0, default=None, metavar="MIN",
+                        help="abre TEMPORALMENTE el '+' para que cualquiera añada personas nuevas durante "
+                             "MIN minutos (60 si no se indica); luego se cierra solo. Sin esta opción no existe")
     parser.add_argument("--admin-pass", default=None,
                         help=f"PIN de administrador (si no, {VARIABLE_ADMIN} o uno aleatorio que se imprime)")
     args = parser.parse_args(argv)
@@ -607,7 +660,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         servidor = crear_servidor(args.config, "127.0.0.1", args.puerto,
-                                  (DOMINIO_TUNEL,) if args.tunel else (), admin_pass=args.admin_pass)
+                                  (DOMINIO_TUNEL,) if args.tunel else (), admin_pass=args.admin_pass,
+                                  inscripcion_abierta_min=args.inscripcion_abierta)
     except ErrorBiometrico as e:
         print(f"Error [{e.codigo}]: {e.mensaje}")
         return 1
@@ -620,6 +674,9 @@ def main(argv: list[str] | None = None) -> int:
     url = f"http://127.0.0.1:{args.puerto}"
     print(f"JumeX Lens en {url}  ·  extractor {estado['extractor']}  ·  "
           f"{estado['personas']} personas en {app.cfg.bd.ruta}")
+    if args.inscripcion_abierta:
+        print(f"\n  INSCRIPCIÓN ABIERTA durante {args.inscripcion_abierta:g} min: cualquiera puede añadir "
+              f"personas NUEVAS con el '+' (máx. {app.MAX_INSCRITOS_ABIERTOS}). Después se cierra sola.")
     if app.admin_pass_generada:
         print(f"\n  PIN de administrador (para inscribir, borrar y ver la base de datos): {app.admin_pass}")
         print(f"  Para fijarlo tú: export {VARIABLE_ADMIN}=tu_pin  (o --admin-pass tu_pin)\n")

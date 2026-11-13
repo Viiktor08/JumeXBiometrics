@@ -57,6 +57,8 @@ function iniciales(nombre) {
 const estado = {
   modo: "verificar",
   admin: false,          // rol: false = usuario (por defecto), true = administrador
+  abierta: 0,            // segundos que le quedan a la inscripción abierta temporal (0 = cerrada)
+  relojAbierta: 0,       // temporizador de la cuenta atrás
   personas: [],          // [{id, muestras, foto}] (solo admin)
   sistema: null,         // /api/estado
   archivo: null,         // File pendiente o analizado
@@ -119,6 +121,8 @@ const ERRORES = {
   limite_muestras: ["comparacion", "Esa persona ya tiene el máximo de fotos", null],
   muestra_incoherente: ["comparacion", "Esta cara no se parece a esa persona", "La foto no coincide con las que ya tiene guardadas. Si de verdad es esa persona, usa una foto más parecida; si es otra, inscríbela con su propio nombre."],
   requiere_admin: ["comparacion", "Necesitas ser administrador", "Esta acción (inscribir, borrar o ver la base de datos) es solo del administrador. Entra con el PIN desde la pastilla de arriba a la derecha."],
+  nombre_ocupado: ["comparacion", "Ese nombre ya existe", "Elige otro nombre. Solo el administrador puede añadir fotos a personas que ya están en la base de datos."],
+  inscripcion_llena: ["comparacion", "Ya no caben más personas ahora", "Se ha alcanzado el máximo de personas que se pueden añadir en este modo temporal."],
   demasiados_intentos: ["comparacion", "Demasiados intentos seguidos", "Se han hecho muchas comparaciones en poco tiempo. Es una protección contra el ajuste automático de plantillas. Espera un momento y vuelve a intentarlo."],
   integridad_bd: ["comparacion", "¡La base de datos ha sido manipulada!", "La firma HMAC no cuadra: alguien ha modificado bd.csv fuera del sistema. Por seguridad no se usa."],
   bd_corrupta: ["comparacion", "La base de datos está dañada", null],
@@ -148,7 +152,9 @@ async function cargarEstado() {
     const s = await api("/api/estado");
     estado.sistema = s;
     estado.admin = !!s.admin;
+    estado.abierta = s.inscripcion_segundos || 0;
     aplicarRol();
+    iniciarCuentaAtras();
     const nombreExtractor = { arcface: "ArcFace", sface: "SFace", lbp: "LBP" }[s.extractor] || s.extractor;
     if (estado.admin) {
       // El admin ve el detalle del sistema: integridad, nº de personas y umbrales
@@ -179,9 +185,27 @@ function aplicarRol() {
   rol.classList.toggle("es-admin", estado.admin);
   $("#rol-texto").textContent = estado.admin ? "Administrador" : "Usuario";
   rol.setAttribute("title", estado.admin ? "Sesión de administrador. Pulsa para salir." : "Modo usuario. Pulsa para entrar como administrador.");
-  $$(".pestana--admin").forEach((b) => { b.hidden = !estado.admin; });
+  // El "+" (inscripción abierta temporal) lo ve solo un usuario no admin y solo mientras dure
+  const abierta = estado.abierta > 0 && !estado.admin;
+  $$(".pestana--admin").forEach((b) => {
+    b.hidden = !(estado.admin || (abierta && b.dataset.modo === "inscribir"));
+  });
+  $("#boton-mas").hidden = !abierta;
   // Si el usuario estaba en una pestaña de admin y ha dejado de serlo, vuelve a verificar
-  if (!estado.admin && (estado.modo === "inscribir" || estado.modo === "bd")) cambiarModo("verificar");
+  // (Inscribir sigue permitido mientras la inscripción abierta esté activa)
+  if (!estado.admin && (estado.modo === "bd" || (estado.modo === "inscribir" && !abierta))) cambiarModo("verificar");
+}
+
+/** Cuenta atrás de la inscripción abierta: actualiza el "+" y lo oculta al caducar. */
+function iniciarCuentaAtras() {
+  clearInterval(estado.relojAbierta);
+  const pintar = () => {
+    if (estado.abierta <= 0) { clearInterval(estado.relojAbierta); aplicarRol(); return; }
+    const m = Math.floor(estado.abierta / 60), seg = String(estado.abierta % 60).padStart(2, "0");
+    $("#mas-texto").textContent = `Añadir · ${m}:${seg}`;
+    estado.abierta -= 1;
+  };
+  if (estado.abierta > 0) { pintar(); estado.relojAbierta = setInterval(pintar, 1000); }
 }
 
 async function cargarPersonas() {
@@ -1330,7 +1354,7 @@ function pintarResultado(respuesta, nombre) {
           el("p", { text: `${respuesta.template.dimension} números (el template) + una firma HMAC que detecta cualquier cambio. La foto no se usa para comparar.` }))),
       el("div", { class: "acciones" },
         el("button", { class: "boton boton--secundario", text: "Verificarla ahora", onclick: () => { $("#nombre").value = r.id; cambiarModo("verificar"); } }),
-        el("button", { class: "boton boton--enlace", text: "Ver en la base de datos →", onclick: () => cambiarModo("bd") })),
+        estado.admin ? el("button", { class: "boton boton--enlace", text: "Ver en la base de datos →", onclick: () => cambiarModo("bd") }) : null),
     );
     const nota = notaManual(respuesta);
     if (nota) contenido.insertBefore(nota, contenido.lastChild);
@@ -1798,6 +1822,13 @@ function iniciar() {
     abrirCamara(recibirArchivo);
   });
   prepararCamara();
+  // "+" de inscripción abierta temporal: lleva al modo Inscribir
+  $("#boton-mas").addEventListener("click", () => {
+    if (estado.ocupado) { avisar("Espera a que termine el análisis"); return; }
+    cambiarModo("inscribir");
+    window.scrollTo({ top: $("#vista-operacion").offsetTop - 16, behavior: reduceMovimiento ? "auto" : "smooth" });
+    avisar("Escribe el nombre y sube o haz una foto");
+  });
   // Login de administrador (pastilla de la cabecera)
   $("#rol").addEventListener("click", abrirLogin);
   $("#login-form").addEventListener("submit", entrarAdmin);

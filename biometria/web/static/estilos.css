@@ -99,6 +99,8 @@ svg { width: 1em; height: 1em; fill: none; stroke: currentColor; stroke-width: 2
 }
 .rol:hover { background: rgba(255, 255, 255, .14); }
 .rol__icono { width: 1.1em; height: 1.1em; }
+.rol--mas { color: #fde68a; border-color: rgba(251, 191, 36, .55); background: rgba(217, 119, 6, .2); font-variant-numeric: tabular-nums; }
+.rol--mas:hover { background: rgba(217, 119, 6, .32); }
 .rol.es-admin { color: #bbf7d0; border-color: rgba(52, 211, 153, .5); background: rgba(16, 185, 129, .16); }
 
 /* ---------- Login de administrador ---------- */
