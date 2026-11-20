@@ -20,8 +20,46 @@ Python o desde una web, **JumeX Lens**.
 > de la evaluación formal y el modelo de amenazas (fases 6 y 7). Los detalles,
 > sin maquillar, están en [Estado del proyecto](#estado-del-proyecto-y-trabajo-pendiente).
 
+## Levantar la web en un comando
+
+Para cualquier grupo, en cualquier ordenador. Solo hace falta **Docker** (Docker
+Desktop en Windows/macOS, u OrbStack en macOS) y **git**.
+
+```bash
+git clone -b FINAL https://github.com/Viiktor08/JumeXBiometrics.git
+cd JumeXBiometrics
+docker compose up --build
+```
+
+La primera vez tarda unos minutos (descarga la imagen base y los modelos, unos
+300 MB, e inscribe a las personas del Dataset). Cuando termina, en la consola sale:
+
+```text
+PIN de administrador (para inscribir, borrar y ver la base de datos): Xy7…
+URL pública (Cloudflare Tunnel): https://algo-algo-algo.trycloudflare.com
+```
+
+- **En tu ordenador:** <http://localhost:8000>
+- **Para que entren otros:** la URL `https://….trycloudflare.com`. Funciona desde
+  cualquier red (móvil, eduroam…) sin abrir puertos ni crear cuentas.
+- **Para pararlo:** `Ctrl+C`. Para dejarlo en segundo plano: `docker compose up --build -d`,
+  la URL se ve con `docker compose logs web` y se para con `docker compose down`.
+
+**Qué conviene saber:**
+
+| | |
+|---|---|
+| **Dónde corre** | En el ordenador que lanza el comando. Si se apaga, se duerme o pierde internet, la web y su URL dejan de funcionar. Cada grupo que lo levante tiene su propia web y su propia URL. |
+| **La URL** | Cambia en cada arranque. Tras reiniciar hay que volver a compartirla. |
+| **Claves y PIN** | No viaja ningún secreto con el repositorio. La primera vez se genera una **clave maestra aleatoria** en `~/.jumex/clave_lens.key` de tu ordenador (cifra y firma la base de datos), y el **PIN de administrador** se genera aleatorio en **cada arranque**. Para un PIN fijo: `cp env.ejemplo .env` y escríbelo ahí (8+ caracteres; `.env` no se sube a git). |
+| **Qué puede hacer cada uno** | Con la URL, cualquiera puede **verificar** e **identificar** (subiendo una foto o con la cámara). **Inscribir, borrar o ver la base de datos** exige el PIN. |
+| **Base de datos** | Se crea sola la primera vez en `data/lens/` con las fotos de `Dataset/` y se reutiliza en los siguientes arranques. Para empezar de cero: `docker compose down`, borrar `data/lens/` y `~/.jumex/clave_lens.key` y `~/.jumex/sello-*.json`, y volver a lanzar. |
+| **Puerto ocupado** | Si el 8000 está en uso: `PUERTO=8080 docker compose up --build` (en PowerShell: `$env:PUERTO=8080; docker compose up --build`). |
+| **Linux** | Si da `Permission denied` en `data/`: `sudo chown -R 1000:1000 data` (el contenedor no corre como root). |
+
 ## Índice
 
+- [Levantar la web en un comando](#levantar-la-web-en-un-comando)
 - [Qué ofrece](#qué-ofrece)
 - [Puesta en marcha](#puesta-en-marcha)
 - [Cómo funciona por dentro](#cómo-funciona-por-dentro)
@@ -50,6 +88,8 @@ Python o desde una web, **JumeX Lens**.
 - [Problemas frecuentes](#problemas-frecuentes)
 - [Glosario](#glosario)
 - [Referencias](#referencias)
+
+> **¿Eres nuevo en el proyecto?** Empieza por [`GUIA_DEL_PROYECTO.md`](GUIA_DEL_PROYECTO.md): qué hace, cómo se lanza y cómo está protegido, explicado de principio a fin.
 
 ---
 
@@ -102,6 +142,11 @@ pytest -q                                             # 241 tests
 
 ### Con Docker
 
+**La web con URL pública:** `docker compose up --build` (ver
+[Levantar la web en un comando](#levantar-la-web-en-un-comando)).
+
+**La CLI** (la misma imagen):
+
 ```bash
 docker build -t jumex-biometrics .
 docker run --rm -v "$(pwd)/data:/app/data" -v "$HOME/.jumex:/home/biometria/.jumex" jumex-biometrics                # estado del entorno
@@ -109,13 +154,11 @@ docker run --rm -v "$(pwd)/data:/app/data" -v "$HOME/.jumex:/home/biometria/.jum
 docker run --rm --entrypoint python jumex-biometrics -m pytest -q          # tests dentro del contenedor
 ```
 
-`data/` se monta como volumen: ahí viven `bd.csv`, la clave y las fotos (que
-deben estar dentro de `data/` para que el contenedor las vea). Los modelos se
-descargan y se verifican durante el *build*, no están en el repositorio.
-Límites: **la web no funciona en Docker** (solo escucha en `127.0.0.1` dentro del
-contenedor) y la cámara tampoco se ve desde Docker en macOS. *El Dockerfile se
-escribió con cuidado pero no se ha podido construir en la máquina de desarrollo
-(no tenía Docker instalado): conviene probarlo.*
+`data/` se monta como volumen: ahí viven `bd.csv` y las fotos (que deben estar
+dentro de `data/` para que el contenedor las vea). Los modelos se descargan y se
+verifican durante el *build*, no están en el repositorio. La cámara de la demo
+`biometria.camara` no se ve desde Docker en macOS (en la web, el botón de la
+cámara sí funciona porque la usa el navegador).
 
 ### Para el equipo: clonar y empezar
 
@@ -649,6 +692,7 @@ Los módulos sueltos también se pueden usar: `Detector` (`detectar`, `procesar`
 | `python scripts/comparar_caras.py FOTO1 FOTO2 ...` | Muestra la similitud entre las caras de varias fotos (una puntuación o una matriz) |
 | `python -m biometria.camara [--umbral U]` | Detección en directo con la webcam: caras, confianza, puntos, resultado de la calidad y la cara alineada; con `s` guarda la foto, con `q` sale |
 | `python -m biometria.web [--tunel]` | Arranca JumeX Lens (ver siguiente apartado) |
+| `python scripts/arrancar_web.py [opciones de la web]` | Lo que ejecuta `docker compose up`: si no existe la BD de la web, la crea con las fotos de `Dataset/` (clave aleatoria nueva) y arranca la web |
 
 ---
 

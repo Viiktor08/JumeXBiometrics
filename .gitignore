@@ -16,7 +16,7 @@ data/*
 *.key
 .env
 
-# Fotos en cualquier carpeta (salvo las figuras de documentación en docs/)
+# Fotos en cualquier carpeta (salvo las figuras de docs/ y el Dataset/ que se inscribe)
 *.jpg
 *.jpeg
 *.png
@@ -25,6 +25,8 @@ data/*
 *.tif
 *.tiff
 !docs/**
+!Dataset/
+!Dataset/**
 
 # --- Modelos pesados: se descargan con scripts/descargar_modelos.py ---
 models/*
@@ -41,8 +43,9 @@ tests/.cache/
 .idea/
 .vscode/
 
-# --- Datos de personas reales: NUNCA al repositorio (datos biométricos) ---
-Dataset/
+# --- Datos de personas reales ---
+# Dataset/ (49 fotos de personas públicas) SÍ va al repositorio: docker compose lo
+# inscribe al arrancar por primera vez. Las BD, plantillas y copias, nunca.
 Dataset */
 Dataset*.tar.gz
 *.tar.gz

@@ -15,3 +15,11 @@ tests/.cache
 .env
 .DS_Store
 Prácticas.pdf
+
+# Fotos de personas reales y otros datasets: no van en la imagen (data/ se monta)
+Dataset
+Dataset */
+*.tar.gz
+caras_lfw
+resultados
+docker-compose.yml

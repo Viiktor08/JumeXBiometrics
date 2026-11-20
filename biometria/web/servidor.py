@@ -812,6 +812,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m biometria.web", description="JumeX Lens (demo web)")
     parser.add_argument("--config", type=Path, default=CONFIG_POR_DEFECTO)
     parser.add_argument("--puerto", type=int, default=8000)
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="interfaz en la que escuchar (0.0.0.0 solo dentro de Docker, "
+                             "con el puerto publicado en 127.0.0.1 del equipo)")
     parser.add_argument("--no-abrir", action="store_true", help="no abrir el navegador")
     parser.add_argument("--tunel", action="store_true",
                         help="publica la web con un túnel de Cloudflare (necesita cloudflared)")
@@ -834,7 +837,7 @@ def main(argv: list[str] | None = None) -> int:
         print("No se encuentra cloudflared. En macOS: brew install cloudflared")
         return 1
     try:
-        servidor = crear_servidor(args.config, "127.0.0.1", args.puerto,
+        servidor = crear_servidor(args.config, args.host, args.puerto,
                                   (DOMINIO_TUNEL,) if args.tunel else (), admin_pass=args.admin_pass,
                                   inscripcion_abierta_min=args.inscripcion_abierta)
     except ErrorBiometrico as e:

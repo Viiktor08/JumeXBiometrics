@@ -17,7 +17,8 @@ admite paréntesis). El nombre se deja como esté escrito en el fichero: si hay
 una errata, se corrige renombrando la foto. Dos fotos con el mismo nombre dan
 la misma persona (se inscriben como muestras distintas).
 
-Las fotos del dataset NO van al repositorio (son datos de personas reales).
+Las fotos de Dataset/ van en el repositorio: scripts/arrancar_web.py las inscribe
+la primera vez que se levanta la web con `docker compose up`.
 """
 
 import argparse

@@ -1,0 +1,32 @@
+# JumeX Lens (la web) en Docker, con URL pública. Un solo comando:
+#
+#   docker compose up --build
+#
+# - En este equipo: http://localhost:8000
+# - Desde fuera: la URL https://….trycloudflare.com que sale en el log (cambia en
+#   cada arranque y solo funciona mientras el contenedor esté levantado).
+# - Ctrl+C lo para (o `docker compose down` si se lanzó con -d).
+#
+# Nada secreto viaja con el repositorio:
+# - La primera vez se crea la BD (data/lens/) con las fotos de Dataset/ y una clave
+#   maestra ALEATORIA en ~/.jumex de ESTE ordenador (ver scripts/arrancar_web.py).
+# - El PIN de administrador se genera aleatorio en cada arranque y sale en el log
+#   (o se fija con BIOMETRIA_ADMIN_PASS en un fichero .env, ver env.ejemplo).
+
+services:
+  web:
+    build: .
+    image: jumex-biometrics
+    entrypoint: ["python", "scripts/arrancar_web.py"]
+    command: ["--host", "0.0.0.0", "--puerto", "8000", "--no-abrir", "--tunel"]
+    environment:
+      BIOMETRIA_ADMIN_PASS: ${BIOMETRIA_ADMIN_PASS:-}
+    ports:
+      # Solo en 127.0.0.1 del equipo: desde la red local no se entra saltándose el túnel
+      - "127.0.0.1:${PUERTO:-8000}:8000"
+    volumes:
+      - ./data:/app/data
+      - ./Dataset:/app/Dataset:ro
+      # Clave maestra: fuera del repo y de data/. HOME en macOS/Linux, USERPROFILE en Windows
+      - ${HOME:-${USERPROFILE}}/.jumex:/home/biometria/.jumex
+    restart: unless-stopped
