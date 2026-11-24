@@ -3,6 +3,11 @@
 # Las rutas relativas se resuelven respecto a la carpeta de ESTE fichero.
 # Se puede usar otro fichero con la variable de entorno BIOMETRIA_CONFIG.
 #
+# Es la configuración ÚNICA del sistema: la CLI, el Docker y la web (JumeX Lens)
+# usan la misma base de datos (data/lens/bd.csv, la que crea `docker compose up`
+# con las fotos de Dataset/) y la misma clave. config_lens.yaml se mantiene por
+# compatibilidad y tiene los mismos valores.
+#
 # Los umbrales están calibrados para ArcFace con scripts/evaluar.py sobre LFW
 # (392 personas, 1173 pares genuinos y 615 432 impostores; EER 0,68 % en 0.158).
 # Si se cambia de extractor HAY QUE RECALIBRARLOS: cada técnica puntúa distinto.
@@ -11,14 +16,15 @@ detector:
   modelo: models/face_detection_yunet_2023mar.onnx
   umbral_confianza: 0.8   # puntuación mínima de YuNet para aceptar una cara
   umbral_nms: 0.3         # supresión de no-máximos entre detecciones solapadas
-  varias_caras: error     # "error" -> rechaza la foto | "mayor" -> usa la cara más grande
+  varias_caras: mayor     # "error" -> rechaza la foto | "mayor" -> usa la cara más grande
+                          # ("mayor": algunas fotos del Dataset tienen más de una cara)
 
 preprocesado:
   tam_cara: [112, 112]    # [ancho, alto] de la cara alineada que recibe el extractor
 
 calidad:
   tam_min_cara: 60          # lado mínimo (px) de la caja de la cara en la imagen original
-  umbral_borrosidad: 50.0   # varianza del Laplaciano mínima sobre la cara alineada
+  umbral_borrosidad: 40.0   # varianza del Laplaciano mínima sobre la cara alineada
 
 extractor:
   nombre: arcface         # extractor registrado en biometria/extractores: arcface (el asignado), sface, lbp
@@ -27,11 +33,11 @@ extractor:
     voltear: true         # suma el vector de la cara volteada (más robusto, el doble de lento)
 
 bd:
-  ruta: data/bd.csv
+  ruta: data/lens/bd.csv  # la BD que crea `docker compose up` con Dataset/
   # Clave maestra (HMAC, cifrado, firma de templates y sello). Tiene prioridad la
   # variable de entorno BIOMETRIA_HMAC_KEY; si no, este fichero. Va FUERA de data/ y
   # del repositorio: quien pueda leer o escribir la BD no debe poder leer la clave.
-  ruta_clave: ~/.jumex/clave_bd.key
+  ruta_clave: ~/.jumex/clave_lens.key
   cifrar_templates: true    # templates cifrados con AES-GCM: leer el CSV no da los vectores
   anti_rollback: true       # sello junto a la clave: detecta volver a una BD antigua o borrarla
   agregacion: max           # cómo combinar varias muestras de una persona: max | media
@@ -52,9 +58,14 @@ limites:
 defensa:
   # Contramedidas frente a ataques (ver THREAT_MODEL.md). Se pueden poner a 0 para
   # medir el sistema sin ellas o para no romper la interoperabilidad del enunciado.
-  coherencia_muestra: 0.20   # al AÑADIR una muestra a alguien que ya existe, debe
-                             # parecerse a las suyas (LFW: rechaza 1,1 % de muestras
-                             # legítimas, bloquea 99,9 % de caras ajenas). 0 = desactivado.
+  coherencia_muestra: 0.35   # al AÑADIR una muestra a alguien que ya existe, debe
+                             # parecerse a su PRIMERA muestra tanto como para verificarse
+                             # (mismo umbral que verificación; LFW: FRR 0,22-0,85 %).
+                             # Antes 0.20 contra la más parecida: la deriva con morphs
+                             # colaba al atacante. 0 = desactivado.
+  ancla_muestra: 0.20        # al verificar/identificar, las muestras extra solo cuentan
+                             # si la foto se parece al menos esto a la PRIMERA muestra
+                             # (LFW: el 0,12 % de impostores llega). 0 = desactivado.
   # Contra el ajuste automático de un template por los métodos _t (hill-climbing):
   decimales_puntuacion_t: 2  # la puntuación que sale por _t se redondea a 2 decimales
   max_intentos_t: 50         # máx. comparaciones _t por id en la ventana (0 = sin límite)

@@ -233,7 +233,7 @@ class Aplicacion:
         """¿Puede un NO admin inscribir a `id_persona` ahora? Devuelve (ok, motivo).
 
         Solo personas NUEVAS: añadir muestras a alguien que ya está inscrito (las
-        49 reales) sigue siendo solo del admin, para no poder manipularlas."""
+        del Dataset) sigue siendo solo del admin, para no poder manipularlas."""
         if self.segundos_inscripcion_abierta() <= 0:
             return False, "requiere_admin"
         try:
@@ -400,28 +400,33 @@ class Aplicacion:
             if operacion == "identificar" and region is None and len(analisis.detecciones) >= 2:
                 return self._filtrar_rol(self._identificar_varias(analisis, respuesta), admin)
             if analisis.error is not None:
-                return self._error(respuesta, analisis.error)
+                return self._filtrar_rol(self._error(respuesta, analisis.error), admin)
             inicio = time.perf_counter()
             try:
                 respuesta["resultado"] = getattr(self, f"_{operacion}")(id_persona, analisis)
             except ErrorBiometrico as e:
                 if not (operacion == "verificar" and not admin and e.codigo == "id_no_inscrito"):
-                    return self._error(respuesta, e)
+                    return self._filtrar_rol(self._error(respuesta, e), admin)
                 respuesta["resultado"] = self._verificar_uniforme(id_persona, analisis)
             respuesta["tiempos_ms"]["comparacion"] = round((time.perf_counter() - inicio) * 1000, 1)
             return self._filtrar_rol(respuesta, admin)
 
     def _filtrar_rol(self, respuesta: dict, admin: bool) -> dict:
         """Recorta de la respuesta lo que un usuario no admin no debe ver: las fotos
-        guardadas en la BD y la lista de personas más parecidas. El usuario sigue
-        viendo el veredicto y el nombre identificado, pero nada que permita recorrer
-        la base de datos por parecido. Ver THREAT_MODEL.md (roles)."""
+        guardadas en la BD, la lista de personas más parecidas, los valores del
+        template y cuánta gente hay inscrita. El usuario sigue viendo el veredicto y
+        el nombre identificado, pero nada que permita recorrer la base de datos por
+        parecido. Ver THREAT_MODEL.md (roles)."""
         if admin:
             return respuesta
+        if isinstance(respuesta.get("template"), dict):
+            # Solo cuántos números tiene (lo enseña el pipeline), no los valores
+            respuesta["template"] = {"dimension": respuesta["template"].get("dimension")}
         r = respuesta.get("resultado")
         if isinstance(r, dict):
             r.pop("candidatos", None)
             r.pop("foto", None)           # foto de la persona de la BD (verificar/identificar)
+            r.pop("personas", None)       # tamaño de la BD: solo para el admin
         for cara in respuesta.get("caras", []):
             cara.pop("candidatos", None)
             cara.pop("foto", None)

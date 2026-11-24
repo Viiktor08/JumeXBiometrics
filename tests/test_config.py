@@ -11,7 +11,7 @@ def test_config_por_defecto_carga():
     assert cfg.preprocesado.tam_cara == (112, 112)
     assert cfg.detector.varias_caras in ("error", "mayor")
     # Las rutas relativas se resuelven respecto a la carpeta de config.yaml
-    assert cfg.bd.ruta == (RAIZ_REPO / "data" / "bd.csv").resolve()
+    assert cfg.bd.ruta == (RAIZ_REPO / "data" / "lens" / "bd.csv").resolve()  # la BD de docker compose up
 
 
 def test_valor_fuera_de_rango(tmp_path):
@@ -47,6 +47,16 @@ def test_config_por_defecto_usa_arcface():
     # La demo web usa el mismo extractor y los mismos umbrales
     lens = cargar_config(RAIZ_REPO / "config_lens.yaml")
     assert lens.extractor.nombre == "arcface" and lens.umbrales == cfg.umbrales
+
+
+def test_cli_docker_y_web_usan_la_misma_bd():
+    # Sin --config, la CLI y el Docker (ENTRYPOINT python -m biometria) deben ver la
+    # BD que crea `docker compose up` (Dataset/), no una BD vacía aparte.
+    cfg = cargar_config()
+    lens = cargar_config(RAIZ_REPO / "config_lens.yaml")
+    assert cfg.bd.ruta == lens.bd.ruta and cfg.bd.ruta_clave == lens.bd.ruta_clave
+    assert cfg.bd.ruta == RAIZ_REPO / "data" / "lens" / "bd.csv"
+    assert cfg.detector == lens.detector and cfg.calidad == lens.calidad and cfg.defensa == lens.defensa
 
 
 @pytest.mark.parametrize("parecido", [-0.1, 0.9])

@@ -987,11 +987,14 @@ async function animarPipeline(respuesta, operacion) {
     const comprobables = r.identificadas + r.desconocidas;
     detalles.deteccion = `${respuesta.caras.length} caras · se comprueban todas`;
     detalles.alineado = `${comprobables} cara${comprobables === 1 ? "" : "s"} alineada${comprobables === 1 ? "" : "s"}${r.descartadas ? ` · ${r.descartadas} descartada${r.descartadas > 1 ? "s" : ""}` : ""}`;
-    detalles.extraccion = `${comprobables} template${comprobables === 1 ? "" : "s"} de ${respuesta.template.dimension} números`;
-    detalles.comparacion = `${comprobables} cara${comprobables === 1 ? "" : "s"} × ${r.personas} personas`;
+    detalles.extraccion = `${comprobables} template${comprobables === 1 ? "" : "s"}${respuesta.template ? ` de ${respuesta.template.dimension} números` : ""}`;
+    detalles.comparacion = r.personas != null
+      ? `${comprobables} cara${comprobables === 1 ? "" : "s"} × ${r.personas} personas`
+      : `${comprobables} cara${comprobables === 1 ? "" : "s"} comparada${comprobables === 1 ? "" : "s"} con la base de datos`;
   } else if (r) {
     if (estado.modo === "verificar") detalles.comparacion = `Con ${r.id}: ${pct(r.puntuacion)}`;
-    if (estado.modo === "identificar") detalles.comparacion = `Con ${r.personas} persona${r.personas === 1 ? "" : "s"}`;
+    if (estado.modo === "identificar") detalles.comparacion = r.personas != null
+      ? `Con ${r.personas} persona${r.personas === 1 ? "" : "s"}` : "Con toda la base de datos";
     if (estado.modo === "inscribir") detalles.comparacion = `Guardado · ${r.muestras} muestra${r.muestras > 1 ? "s" : ""}`;
   }
 
@@ -1014,7 +1017,7 @@ async function animarPipeline(respuesta, operacion) {
       mini.src = respuesta.cara_alineada;
       mini.hidden = false;
     }
-    if (paso === "extraccion" && respuesta.template) {
+    if (paso === "extraccion" && respuesta.template?.valores) {  // los valores solo los recibe el admin
       dibujarCodigo($(`.paso[data-paso="extraccion"] .paso__codigo`), respuesta.template.valores, 26);
     }
   }
@@ -1221,7 +1224,7 @@ function pintarVariasCaras(respuesta) {
       `He encontrado ${respuesta.caras.length} personas`, partes.join(" · ")),
     el("ol", { class: "grupo" }, filas),
     el("p", { class: "explicacion" }, el("b", { text: "¿Cómo? " }),
-      `Cada cara se alinea y se convierte en su propio template, y se compara con las ${r.personas} personas de la base de datos. Si alguna sale mal, márcala a mano para comprobarla sola.`)));
+      `Cada cara se alinea y se convierte en su propio template, y se compara con ${r.personas != null ? `las ${r.personas} personas de` : "todas las personas de"} la base de datos. Si alguna sale mal, márcala a mano para comprobarla sola.`)));
 }
 
 /** Desde una foto de grupo: inscribir a una de las caras desconocidas. */

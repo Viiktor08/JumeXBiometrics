@@ -161,16 +161,28 @@ class SistemaBiometrico:
     # Comparación
     # ------------------------------------------------------------------ #
     def _puntuar(self, template: np.ndarray, muestras: list[np.ndarray]) -> float:
-        """Similitud frente a una persona: máximo o media sobre sus muestras."""
+        """Similitud frente a una persona: máximo o media sobre sus muestras.
+
+        Con `defensa.ancla_muestra`, la primera muestra (la inscripción original)
+        manda: si la foto no se le parece al menos eso, las demás muestras no
+        cuentan y la puntuación es la de la primera. Una muestra añadida después
+        (p. ej. un morph envenenado) no puede colar a quien no se parece a la
+        persona inscrita. Ver THREAT_MODEL.md, paso 1."""
         puntuaciones = [self.extractor.comparar(template, m) for m in muestras]
+        ancla = self.cfg.defensa.ancla_muestra
+        if ancla > 0.0 and len(puntuaciones) > 1 and puntuaciones[0] < ancla:
+            return puntuaciones[0]
         if self.cfg.bd.agregacion == "media":
             return float(np.mean(puntuaciones))
         return max(puntuaciones)
 
     def _comprobar_coherencia(self, id_persona: str, template) -> None:
         """Defensa contra el envenenamiento de la inscripción: una muestra nueva de
-        una persona que YA existe tiene que parecerse a las que ya tiene. Así no se
-        puede añadir la cara de un atacante como muestra de la víctima.
+        una persona que YA existe tiene que parecerse a su PRIMERA muestra (la
+        inscripción original). Así no se puede añadir la cara de un atacante como
+        muestra de la víctima, ni llegar a ella poco a poco con una cadena de morphs:
+        antes se comparaba con la más parecida de todas, incluidas las recién
+        añadidas, y la deriva colaba al atacante (8 de 8 parejas en la revisión).
 
         Solo se aplica al AÑADIR a alguien existente: la primera muestra (persona
         nueva) no tiene con qué compararse, y crear a alguien es responsabilidad de
@@ -182,10 +194,10 @@ class SistemaBiometrico:
         if not anteriores:
             return  # persona nueva: nada con que comparar
         template = self.extractor.validar_template(template)
-        puntuacion = self._puntuar(template, anteriores)
+        puntuacion = self.extractor.comparar(template, anteriores[0])
         if puntuacion < umbral:
             raise MuestraIncoherente(
-                f"La foto no se parece lo suficiente a las muestras de '{validar_id(id_persona)}' "
+                f"La foto no se parece lo suficiente a la primera muestra de '{validar_id(id_persona)}' "
                 f"(similitud {puntuacion:.2f}, mínimo {umbral:.2f}). Si de verdad es esa persona, "
                 "usa una foto más parecida a las que ya tiene; si es otra persona, inscríbela con su nombre."
             )

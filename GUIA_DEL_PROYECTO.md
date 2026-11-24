@@ -28,9 +28,10 @@ ella**.
 
 ### 2.1 La primera vez
 
-Necesitas **Python 3.11 o superior**, `git` y la carpeta **`Dataset/`** con las fotos
-(no está en el repositorio porque son fotos de personas reales: se pasa por un
-canal privado).
+Necesitas **Python 3.11 o superior** y `git`. La carpeta **`Dataset/`** (las 49 fotos
+que entregó el docente y la de Lionel Messi, nuestra persona elegida) **viene en el repositorio**, para que `docker compose up`
+cree la base de datos solo. Lo más fácil es no instalar nada y usar Docker
+(`docker compose up --build`, ver el README); esto es para trabajar sin Docker.
 
 ```bash
 # 1) Clonar FUERA de OneDrive/iCloud/Dropbox (rompen la carpeta .git)
@@ -49,9 +50,9 @@ python scripts/descargar_modelos.py
 # 4) Comprobar que todo está bien
 pytest -q                                   # deben pasar todos los tests
 
-# 5) Copiar la carpeta Dataset/ a la raíz del repo y cargar la base de datos
+# 5) Cargar la base de datos con las fotos de Dataset/ (en data/lens/)
 python scripts/preparar_dataset.py Dataset  # crea data/dataset_ids.csv (nombre de cada foto)
-python scripts/inscribir_csv.py data/dataset_ids.csv --config config_lens.yaml
+python scripts/inscribir_csv.py data/dataset_ids.csv
 
 # 6) Lanzar la web
 python -m biometria.web --admin-pass UN_PIN_LARGO   # abre http://127.0.0.1:8000
@@ -85,7 +86,11 @@ Mueve la clave a `~/.jumex/`, cifra la base de datos y crea el sello.
 ```bash
 brew install cloudflared                                    # una vez (macOS)
 python -m biometria.web --tunel --admin-pass UN_PIN_LARGO   # escribe una URL https://….trycloudflare.com
+docker compose --profile publico up --build web-publico     # lo mismo con Docker
 ```
+
+`docker compose up` a secas **no** publica nada: la web queda solo en
+<http://localhost:8000>. Publicadla solo cuando haga falta (en clase, para el rival).
 
 El servidor sigue en tu ordenador; Cloudflare solo reenvía las visitas. La URL
 cambia cada vez y funciona mientras el comando esté abierto. **Con `--tunel` el
@@ -94,21 +99,29 @@ Si no pasas PIN, se genera uno aleatorio y se imprime.
 
 ### 2.4 La línea de comandos (lo que usará el profesor y el rival)
 
-Todas las respuestas son **una línea JSON**. `--config` va **antes** del comando.
+Todas las respuestas son **una línea JSON**. Sin `--config` se usa la **misma base
+de datos que la web** (`data/lens/bd.csv`, las 50 personas del Dataset).
 
 ```bash
-python -m biometria --config config_lens.yaml bd                       # estado de la BD y protecciones activas
-python -m biometria --config config_lens.yaml verificar   --id "Keanu Reeves" --foto foto.jpg
-python -m biometria --config config_lens.yaml identificar --foto foto.jpg
-python -m biometria --config config_lens.yaml identificar_sd --foto cara_recortada.png
+python -m biometria bd                                       # estado de la BD, ids exactos y protecciones activas
+python -m biometria verificar   --id "Keanu Reeves" --foto foto.jpg
+python -m biometria identificar --foto foto.jpg
+python -m biometria identificar_sd --foto cara_recortada.png
 
 # Métodos _t: el template tiene que haberlo generado el propio sistema
-python -m biometria --config config_lens.yaml extraer --foto foto.jpg --salida t.npy   # crea t.npy y t.npy.sig
-python -m biometria --config config_lens.yaml verificar_t --id "Keanu Reeves" --template t.npy
+python -m biometria extraer --foto foto.jpg --salida t.npy   # crea t.npy y t.npy.sig
+python -m biometria verificar_t --id "Keanu Reeves" --template t.npy
 ```
 
-`config_lens.yaml` es la base de datos de la web (las 49 personas del Dataset).
-Sin `--config` se usa `config.yaml`, que tiene su propia base de datos.
+Con Docker, lo mismo dentro del contenedor (con la web levantada):
+
+```bash
+docker compose exec web python -m biometria verificar --id "Keanu Reeves" --foto Dataset/keanu_reeves_2021.png
+```
+
+Los ids se escriben **exactamente** como salen en `bd` (mayúsculas incluidas):
+algunos tienen erratas que vienen de los nombres de fichero del Dataset
+(`Arianna Grande`, `Serenna Williams`, `Wiliem Dafoe`…).
 
 ---
 
@@ -185,7 +198,7 @@ famosos, con `scripts/evaluar.py`. Comparando 1173 parejas de la misma persona y
     *administrador* con PIN (todo).
 - **Evaluación medida**: `scripts/evaluar.py` (aciertos y errores en LFW) y
   `scripts/medir_defensas.py` (cuánto cuesta y cuánto protege cada defensa).
-- **241 tests automáticos** que lanzan los ataques de verdad y comprueban que se
+- **245 tests automáticos** que lanzan los ataques de verdad y comprueban que se
   paran sin estropear el uso normal.
 - **Dockerfile** para ejecutarlo sin instalar nada.
 
@@ -201,16 +214,23 @@ Hemos pensado como ese atacante, probado cada ataque y puesto una defensa.
 **fuera** de la carpeta `data/` y del repositorio. Quien lea o modifique `data/`
 no tiene la clave, y sin la clave no puede firmar, cifrar ni engañar al sello.
 
+**Ojo, dos escenarios** (detalle en `THREAT_MODEL.md`): si el rival ataca **nuestra**
+web o un ordenador nuestro, eso vale. Pero si el rival ejecuta el sistema **en su
+ordenador** (`docker compose up`), la clave se crea allí y es suya: el cifrado, la
+firma y el sello no le frenan. Ahí solo cuentan las defensas que no dependen de un
+secreto: coherencia y ancla de las muestras, margen de gemelos, cara en `_sd` y
+validación de entradas. Lo decimos nosotros antes que el rival.
+
 ### 5.1 Resumen
 
 | # | Ataque | Qué pasaba antes | Defensa |
 |---|---|---|---|
-| 1 | Añadir **mi cara** como foto extra de la víctima | Me aceptaba como ella para siempre | Una foto nueva de alguien que ya existe tiene que parecerse a las suyas |
+| 1 | Añadir **mi cara** como foto extra de la víctima, o llegar a ella con **morphs** | Me aceptaba como ella para siempre (los morphs, 8 de 8 parejas) | Una foto nueva tiene que parecerse a la **primera** de esa persona, y las fotos extra no cuentan para quien no se parece a la primera |
 | R | Usar la web para inscribir, borrar o ver la BD | Cualquiera con la URL podía hacerlo todo | Rol usuario por defecto; administrador con PIN, comprobado en el servidor |
 | 2 | Pasar a `_t` un vector **copiado de la BD** o inventado | Se aceptaba (similitud 1,0) | El sistema **firma** sus vectores y `_t` rechaza los que no están firmados |
-| 3 | **Ajustar** un vector poco a poco mirando la puntuación | Colaba en 15 000–36 000 intentos (1–3 s) | Cualquier retoque rompe la firma; además, puntuación redondeada y límite de intentos |
+| 3 | **Ajustar** un vector poco a poco mirando la puntuación | Colaba en unos cientos de intentos (menos de 1 s) | Cualquier retoque rompe la firma; el redondeo y el límite de intentos solo lo retrasan |
 | 4 | **Gemelos** o dobles en identificar | Elegía a uno aunque estuvieran empatados | Si el 1.º no le saca 0,10 al 2.º: "desconocido (ambiguo)" |
-| 5 | Pasar a `_sd` algo que **no es una cara** | Aceptaba ruido o cualquier imagen | YuNet comprueba que hay una cara |
+| 5 | Pasar a `_sd` (o a la cara marcada a mano en la web) algo que **no es una cara** | Aceptaba ruido o cualquier imagen | YuNet comprueba que hay una cara |
 | 6a | **Leer** el CSV | Se veían los vectores | Cifrado AES-256-GCM |
 | 6b | **Escribir** el CSV y volver a firmarlo | La clave estaba al lado del CSV | La clave está en `~/.jumex/` |
 | 6c | Volver a una **copia antigua** del CSV o borrarlo | Pasaba sin aviso | Sello anti-rollback junto a la clave |
@@ -221,10 +241,17 @@ no tiene la clave, y sin la clave no puede firmar, cifrar ni engañar al sello.
 
 **1 · Envenenar la inscripción.** Como cuenta la foto más parecida de cada persona,
 basta con colar una foto mía bajo el nombre de la víctima para pasar por ella
-siempre. Ahora, al añadir una foto a alguien que ya existe, tiene que parecerse a
-las que ya tiene (similitud de al menos 0,20). En LFW eso frena el **99,9 %** de las
-caras ajenas y solo molesta al **1,1 %** de las fotos legítimas. Error:
-`muestra_incoherente`.
+siempre. Al principio la comparábamos con la más parecida de **todas** las fotos de
+esa persona (umbral 0,20), y la revisión lo rompió con **morphs**: 8 mezclas
+progresivas de su cara con la mía, cada una parecida a la anterior, y al final yo
+entraba como ella (8 de 8 parejas). Ahora hay dos defensas:
+- **Coherencia contra la primera foto:** una foto nueva de alguien que ya existe
+  tiene que parecerse a su **primera** foto (la inscripción original) tanto como para
+  verificarse (0,35). La cadena de morphs se corta en cuanto se aleja de ella.
+- **Ancla:** al verificar o identificar, las fotos extra solo cuentan si la foto se
+  parece al menos 0,20 a la **primera**. Un morph que sí entró se parece a ella y a
+  mí, pero yo contra su primera foto saco 0,00–0,06, así que no me sirve.
+Error: `muestra_incoherente`.
 
 **R · Roles en la web.** Por defecto eres *usuario*: verificas e identificas, ves el
 nombre y el porcentaje, pero **no ves las fotos de la base de datos ni la lista de
@@ -243,7 +270,8 @@ inventado tampoco, y uno retocado la pierde.
 
 **3 · Ajuste por la puntuación (hill-climbing).** El atacante parte de ruido,
 cambia un poco el vector, mira si la puntuación sube, se queda con el cambio si
-sube y repite. Lo medimos: **colaba en 1–3 segundos**. Lo que lo para de verdad es
+sube y repite. Lo medimos: **colaba en unos cientos de intentos** (216 sin
+redondeo, 393 con 2 decimales, en menos de un segundo). Lo que lo para de verdad es
 la firma: el primer retoque ya no está firmado y el sistema lo rechaza **sin dar
 puntuación**, así que el atacante no tiene nada que le guíe. Además, la puntuación
 de `_t` se redondea a 2 decimales y hay un límite de 50 intentos por minuto
@@ -260,7 +288,8 @@ diferencia es siempre mucho mayor.
 **5 · Cara en `_sd`.** Los `_sd` se saltan el detector, así que aceptaban cualquier
 imagen nítida: ruido, un dibujo, un patrón fabricado. Ahora YuNet comprueba que
 hay una cara (sin usarla para alinear, porque el método sigue siendo "sin
-detector"). Medido: acepta el **100 %** de las caras recortadas legítimas y rechaza
+detector"). Lo mismo en la web cuando se marca la cara a mano y no se encuentran
+sus puntos: antes ese recuadro se usaba tal cual y por ahí entraba ruido. Medido: acepta el **100 %** de las caras recortadas legítimas y rechaza
 el **100 %** del ruido y el **99 %** de los trozos de fondo.
 
 **6 · La base de datos.** Cuatro capas:
@@ -291,6 +320,8 @@ el **100 %** del ruido y el **99 %** de los trozos de fondo.
 - **Averiguar quién está inscrito**: antes, verificar un nombre inventado decía "no
   está inscrito", así que se podía ir probando nombres. Ahora un usuario recibe un
   rechazo normal, igual que con alguien que sí existe.
+- **Lo que ve un usuario**: el veredicto y el nombre, pero no los valores del
+  vector ni cuánta gente hay en la base de datos.
 - Ya estaba de antes: solo escucha en el propio ordenador, cabeceras contra CSRF,
   política de contenido estricta, límites de tamaño de foto.
 
@@ -317,6 +348,15 @@ documentados en `THREAT_MODEL.md`:
 6. **Quien tenga la clave o el PIN** puede hacerlo todo: son la raíz de confianza.
 7. **La primera foto de una persona** no se compara con nada: si el administrador
    la inscribe con una foto equivocada, el sistema se la cree.
+8. **Las fotos de inscripción están en el repositorio** (`Dataset/`, para que
+   `docker compose up` funcione solo): con la foto exacta de alguien, verificar da
+   1,00. Son fotos públicas de famosos y el repo es privado, pero el rival lo tiene.
+9. **El rival ejecutando el sistema en su ordenador** tiene la clave (ver arriba).
+10. **Borrar el sello** (`~/.jumex/sello-*.json`) y poner una copia antigua de la BD:
+    sin sello, el sistema se fía del CSV que hay. Hace falta escribir en `~/.jumex/`.
+11. **La misma cara con otro nombre**: si alguien la inscribe (el admin o, con la
+    inscripción abierta, cualquiera), la identificación de esa persona sale
+    "ambiguo". Verificar sigue funcionando.
 
 ---
 
@@ -341,7 +381,7 @@ documentados en `THREAT_MODEL.md`:
 - **"¿Qué pasa con los gemelos?"** Ver 5.3, punto 1: lo sabemos, lo medimos y
   explicamos por qué no tiene solución con este tipo de sistema.
 - **"¿Cómo sé qué protecciones están activas?"**
-  `python -m biometria --config config_lens.yaml bd` las lista.
+  `python -m biometria bd` las lista (en Docker: `docker compose exec web python -m biometria bd`).
 
 ---
 
@@ -349,7 +389,7 @@ documentados en `THREAT_MODEL.md`:
 
 ```
 biometria/
-  sistema.py          los 9 métodos y las defensas de los métodos (firma, margen, coherencia)
+  sistema.py          los 9 métodos y las defensas de los métodos (firma, margen, coherencia, ancla)
   detector.py         YuNet, alineado, calidad, comprobación de cara en _sd
   extractores/        arcface.py (el principal), sface.py, lbp.py
   bd.py               CSV: firmas, cifrado, sello anti-rollback, bloqueo
@@ -358,10 +398,10 @@ biometria/
   cli.py              línea de comandos (salida JSON)
   web/servidor.py     JumeX Lens: API, roles, PIN, límites
   web/static/         la interfaz (HTML, CSS, JavaScript)
-config.yaml           configuración de la CLI (BD en data/bd.csv)
-config_lens.yaml      configuración de la web (BD en data/lens/bd.csv)
+config.yaml           configuración única: CLI, Docker y web (BD en data/lens/bd.csv)
+config_lens.yaml      igual que config.yaml (se mantiene por compatibilidad)
 scripts/              preparar_dataset, inscribir_csv, evaluar, medir_defensas, proteger_bd…
-tests/                241 tests (test_defensas.py y test_web.py prueban los ataques)
+tests/                245 tests (test_defensas.py y test_web.py prueban los ataques)
 THREAT_MODEL.md       cada ataque y defensa en detalle, con sus tests
 ~/.jumex/             (fuera del repo) claves maestras y sellos. NO compartir
 ```

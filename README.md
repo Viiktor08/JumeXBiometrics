@@ -13,11 +13,12 @@ Python o desde una web, **JumeX Lens**.
 
 ![Pantalla de inicio de JumeX Lens](docs/jumex-lens-inicio.png)
 
-> **Estado:** las fases 1 a 5 del proyecto (detector, extractores, base de
-> datos, los 9 métodos y la CLI) y la demo web están terminadas y probadas
-> (195 tests). La técnica asignada, **ArcFace**, es el extractor principal, con
-> los umbrales calibrados sobre LFW (`scripts/evaluar.py`). **Faltan** las curvas
-> de la evaluación formal y el modelo de amenazas (fases 6 y 7). Los detalles,
+> **Estado:** el sistema (detector, extractores, base de datos, los 9 métodos, la
+> CLI y la web) está terminado y probado (todos los tests pasan, también dentro del
+> Docker), y el modelo de amenazas está en [`THREAT_MODEL.md`](THREAT_MODEL.md). La
+> técnica asignada, **ArcFace**, es el extractor principal, con los umbrales
+> calibrados sobre LFW (`scripts/evaluar.py`). **Faltan** las curvas DET/ROC/CMC y
+> la evaluación del grupo rival. Los detalles,
 > sin maquillar, están en [Estado del proyecto](#estado-del-proyecto-y-trabajo-pendiente).
 
 ## Levantar la web en un comando
@@ -32,25 +33,36 @@ docker compose up --build
 ```
 
 La primera vez tarda unos minutos (descarga la imagen base y los modelos, unos
-300 MB, e inscribe a las personas del Dataset). Cuando termina, en la consola sale:
+300 MB, e inscribe a las personas del Dataset). Cuando termina, en la consola sale
+el **PIN de administrador** (para inscribir, borrar y ver la base de datos).
 
-```text
-PIN de administrador (para inscribir, borrar y ver la base de datos): Xy7…
-URL pública (Cloudflare Tunnel): https://algo-algo-algo.trycloudflare.com
-```
+- **En tu ordenador:** <http://localhost:8000>. Por defecto la web **no** se publica
+  en internet.
+- **Para que entren otros** (por ejemplo en clase), con una URL pública
+  `https://….trycloudflare.com` que funciona desde cualquier red sin abrir puertos:
 
-- **En tu ordenador:** <http://localhost:8000>
-- **Para que entren otros:** la URL `https://….trycloudflare.com`. Funciona desde
-  cualquier red (móvil, eduroam…) sin abrir puertos ni crear cuentas.
-- **Para pararlo:** `Ctrl+C`. Para dejarlo en segundo plano: `docker compose up --build -d`,
-  la URL se ve con `docker compose logs web` y se para con `docker compose down`.
+  ```bash
+  docker compose --profile publico up --build web-publico
+  ```
+
+  Sale en el log (`docker compose logs web-publico`). Cualquiera con la URL puede
+  verificar e identificar: levántala solo cuando haga falta.
+- **La CLI, con la misma base de datos** (los 9 métodos; ver [Uso](#uso)):
+
+  ```bash
+  docker compose exec web python -m biometria bd
+  docker compose exec web python -m biometria verificar --id "Keanu Reeves" --foto Dataset/keanu_reeves_2021.png
+  ```
+
+- **Para pararlo:** `Ctrl+C`. Para dejarlo en segundo plano: `docker compose up --build -d`
+  y se para con `docker compose down`.
 
 **Qué conviene saber:**
 
 | | |
 |---|---|
 | **Dónde corre** | En el ordenador que lanza el comando. Si se apaga, se duerme o pierde internet, la web y su URL dejan de funcionar. Cada grupo que lo levante tiene su propia web y su propia URL. |
-| **La URL** | Cambia en cada arranque. Tras reiniciar hay que volver a compartirla. |
+| **La URL pública** | Solo con `--profile publico`. Cambia en cada arranque: tras reiniciar hay que volver a compartirla. |
 | **Claves y PIN** | No viaja ningún secreto con el repositorio. La primera vez se genera una **clave maestra aleatoria** en `~/.jumex/clave_lens.key` de tu ordenador (cifra y firma la base de datos), y el **PIN de administrador** se genera aleatorio en **cada arranque**. Para un PIN fijo: `cp env.ejemplo .env` y escríbelo ahí (8+ caracteres; `.env` no se sube a git). |
 | **Qué puede hacer cada uno** | Con la URL, cualquiera puede **verificar** e **identificar** (subiendo una foto o con la cámara). **Inscribir, borrar o ver la base de datos** exige el PIN. |
 | **Base de datos** | Se crea sola la primera vez en `data/lens/` con las fotos de `Dataset/` y se reutiliza en los siguientes arranques. Para empezar de cero: `docker compose down`, borrar `data/lens/` y `~/.jumex/clave_lens.key` y `~/.jumex/sello-*.json`, y volver a lanzar. |
@@ -119,7 +131,7 @@ Son los **9 métodos que pide el enunciado**. Además:
 - **Base de datos en CSV** con firma HMAC por fila, cifrado opcional de los templates y escritura atómica.
 - **JumeX Lens**: web para verificar, identificar (incluso a varias personas en una foto), inscribir y editar la base de datos, con la animación de cada paso del pipeline. Las fotos se pueden subir o **hacer en el momento con la cámara**.
 - **Demo de cámara** en directo y varios scripts para revisar el detector y comparar caras.
-- **Dockerfile** y **241 tests**.
+- **Dockerfile** y **245 tests**.
 
 ---
 
@@ -134,7 +146,7 @@ python3 -m venv .venv && source .venv/bin/activate   # en Windows: .venv\Scripts
 pip install -r requirements-dev.txt
 python scripts/descargar_modelos.py                   # baja los modelos y verifica su SHA256
 python -m biometria                                   # comprueba que todo está en su sitio
-pytest -q                                             # 241 tests
+pytest -q                                             # 245 tests
 ```
 
 > Si el repo está en OneDrive o Dropbox, crea el entorno virtual **fuera** de la
@@ -142,20 +154,23 @@ pytest -q                                             # 241 tests
 
 ### Con Docker
 
-**La web con URL pública:** `docker compose up --build` (ver
+**La web:** `docker compose up --build` (ver
 [Levantar la web en un comando](#levantar-la-web-en-un-comando)).
 
-**La CLI** (la misma imagen):
+**La CLI** (la misma imagen y la **misma BD** que la web, `data/lens/bd.csv`; sin
+`--config`):
 
 ```bash
-docker build -t jumex-biometrics .
-docker run --rm -v "$(pwd)/data:/app/data" -v "$HOME/.jumex:/home/biometria/.jumex" jumex-biometrics                # estado del entorno
-docker run --rm -v "$(pwd)/data:/app/data" -v "$HOME/.jumex:/home/biometria/.jumex" jumex-biometrics inscribir --id "Ana López" --foto data/fotos/ana.jpg
-docker run --rm --entrypoint python jumex-biometrics -m pytest -q          # tests dentro del contenedor
+docker compose exec web python -m biometria bd                                  # con la web levantada
+docker compose exec web python -m biometria identificar --foto Dataset/adele_2016.jpg
+docker compose run --rm --entrypoint python web -m biometria bd                 # sin levantar la web
+docker compose run --rm --entrypoint python web -m pytest -q -p no:cacheprovider  # tests en el contenedor
 ```
 
-`data/` se monta como volumen: ahí viven `bd.csv` y las fotos (que deben estar
-dentro de `data/` para que el contenedor las vea). Los modelos se descargan y se
+`data/` se monta como volumen: ahí viven `lens/bd.csv` y las fotos de la galería.
+`Dataset/` también se monta (solo lectura), así que sus fotos se pueden usar en la
+CLI con la ruta `Dataset/…`; cualquier otra foto tiene que estar dentro de `data/`
+para que el contenedor la vea. Los modelos se descargan y se
 verifican durante el *build*, no están en el repositorio. La cámara de la demo
 `biometria.camara` no se ve desde Docker en macOS (en la web, el botón de la
 cámara sí funciona porque la usa el navegador).
@@ -168,20 +183,23 @@ cd JumeXBiometrics
 python3 -m venv ~/.venvs/jumex && source ~/.venvs/jumex/bin/activate
 pip install -r requirements-dev.txt
 python scripts/descargar_modelos.py          # ~290 MB la primera vez (ArcFace); verifica SHA256
-pytest -q                                    # 241 tests
+pytest -q                                    # 245 tests
 ```
 
 - El repositorio es **privado**: hay que tener acceso (Settings → Collaborators).
 - **No clones dentro de OneDrive, Dropbox o iCloud.** Esos servicios dejan ficheros
   de `.git` solo en la nube y git empieza a dar `Operation timed out`. Usa una
   carpeta normal (p. ej. `~/dev`). El entorno virtual, también fuera.
-- Los **datos no están en el repositorio** (fotos de personas reales, claves,
-  bases de datos y modelos están en el `.gitignore`). El dataset se pasa por un
-  canal privado. Con la carpeta `Dataset/` (fotos `persona_año.jpg`) ya descargada:
+- **`Dataset/` (las 49 fotos del docente y la de Lionel Messi, la persona elegida por
+  el equipo) sí está en el repositorio**, para que
+  `docker compose up` cree la BD solo. Las claves, las bases de datos, los modelos y
+  cualquier otra foto están en el `.gitignore`. Ojo: quien tenga el repo tiene la
+  foto exacta con la que se inscribió cada persona (ver
+  [`THREAT_MODEL.md`](THREAT_MODEL.md), riesgos aceptados). Para crear la BD sin Docker:
 
 ```bash
 python scripts/preparar_dataset.py Dataset                          # crea data/dataset_ids.csv
-python scripts/inscribir_csv.py data/dataset_ids.csv --config config_lens.yaml
+python scripts/inscribir_csv.py data/dataset_ids.csv                # BD en data/lens/ (config.yaml)
 python -m biometria.web --admin-pass TU_PIN_LARGO                   # http://127.0.0.1:8000
 ```
 
@@ -378,7 +396,7 @@ entre todas (o la **media**, con `bd.agregacion: media`).
 
 ### La base de datos
 
-Los templates se guardan en un **CSV** (`data/bd.csv` por defecto), **una fila
+Los templates se guardan en un **CSV** (`data/lens/bd.csv` por defecto), **una fila
 por muestra**; una persona puede tener varias:
 
 ```
@@ -409,8 +427,8 @@ colar a nadie ni borrar a nadie sin que se note:
 - **Escritura atómica:** se escribe en un fichero temporal, se fuerza a disco y se
   renombra. Un fallo a mitad no deja un CSV a medias.
 - **La clave** viene de la variable de entorno `BIOMETRIA_HMAC_KEY` (mínimo 32
-  caracteres) o, si no existe, del fichero `bd.ruta_clave`: **`~/.jumex/clave_bd.key`**
-  (CLI) y **`~/.jumex/clave_lens.key`** (web), **fuera de `data/` y del
+  caracteres) o, si no existe, del fichero `bd.ruta_clave`: **`~/.jumex/clave_lens.key`**
+  (la misma para la CLI, el Docker y la web), **fuera de `data/` y del
   repositorio**, para que quien pueda leer o escribir la BD no tenga también la
   clave. Se genera sola la primera vez que se inscribe a alguien (64 caracteres
   aleatorios, permisos `600`). De esa clave maestra se derivan, con HKDF, **cuatro
@@ -454,7 +472,9 @@ quiera. En Windows no hay bloqueo de fichero.
 1. Se valida el `id`.
 2. La foto pasa por el pipeline (pasos 1 a 4) y da un template.
 3. Se añade como una **nueva muestra** de esa persona (se crea si es nueva), si no
-   se supera el máximo de muestras.
+   se supera el máximo de muestras. Si la persona ya existía, la muestra nueva tiene
+   que parecerse a su **primera** muestra (`coherencia_muestra`, paso 1 del
+   THREAT_MODEL).
 
 El sistema **no comprueba que la cara no esté ya inscrita con otro nombre** (ver
 [limitaciones](#estado-del-proyecto-y-trabajo-pendiente)).
@@ -596,6 +616,10 @@ Con ArcFace, según el umbral:
 python -m biometria [--config FICHERO] <comando> [opciones]
 ```
 
+Sin `--config` se usa `config.yaml`, que apunta a la **misma base de datos que la
+web y el Docker** (`data/lens/bd.csv`, con la clave `~/.jumex/clave_lens.key`).
+`--config config_lens.yaml` sigue funcionando y da lo mismo.
+
 | Comando | Qué hace |
 |---|---|
 | `inscribir --id ID --foto F` | Inscribe una muestra (pipeline completo) |
@@ -700,8 +724,8 @@ Los módulos sueltos también se pueden usar: `Detector` (`detectar`, `procesar`
 
 Interfaz para **ver el sistema funcionando**: se suelta una foto (o se hace con
 la cámara) y se enseña cada paso del pipeline, con animación de detección y de
-escaneo. Usa [`config_lens.yaml`](config_lens.yaml): extractor **ArcFace** y los
-mismos umbrales que `config.yaml`, con una base de datos propia en `data/lens/`.
+escaneo. Usa [`config_lens.yaml`](config_lens.yaml), que tiene los mismos valores que
+`config.yaml`: extractor **ArcFace** y la misma base de datos (`data/lens/`) que la CLI.
 
 ```bash
 python scripts/descargar_modelos.py
@@ -817,6 +841,11 @@ BIOMETRIA_ADMIN_PASS=TU_PIN python -m biometria.web
   timeout de 20 s por conexión y como mucho 32 conexiones a la vez (*slowloris*).
 - **Verificar no revela quién está inscrito:** a un usuario, un nombre que no
   existe le da un rechazo normal, no "no inscrito".
+- **El usuario no recibe los valores del template ni cuánta gente hay inscrita**
+  (solo la dimensión del template, para el dibujo del pipeline). El admin sí.
+- **Cara marcada a mano:** si en el recuadro no se encuentran los puntos clave, se
+  usa sin alinear, pero antes se comprueba que hay una cara (como en los `_sd`):
+  un recuadro con ruido o con fondo da `sin_cara`.
 - Rechaza peticiones cuyo **`Host`** no sea localhost (*DNS rebinding*).
 - El tamaño de la foto se comprueba **antes de leer el cuerpo**; solo se sirven los
   ficheros de la carpeta `static/`; el navegador recibe una *Content-Security-Policy*
@@ -829,6 +858,7 @@ BIOMETRIA_ADMIN_PASS=TU_PIN python -m biometria.web
 ```bash
 brew install cloudflared            # una vez
 python -m biometria.web --tunel     # escribe la URL https://<algo>.trycloudflare.com
+docker compose --profile publico up --build web-publico   # lo mismo, en Docker (cloudflared viene en la imagen)
 ```
 
 El servidor **sigue en tu equipo** y Cloudflare reenvía las visitas (sobre HTTPS):
@@ -842,8 +872,9 @@ de personas que no hayan dado su permiso.
 
 ## Configuración
 
-Todo lo ajustable está en [`config.yaml`](config.yaml) (el que usa la CLI por
-defecto) y en [`config_lens.yaml`](config_lens.yaml) (el de la web). Se puede usar
+Todo lo ajustable está en [`config.yaml`](config.yaml) (el que usan por defecto la
+CLI y el Docker); [`config_lens.yaml`](config_lens.yaml), el de la web, tiene los
+mismos valores. Se puede usar
 otro con `--config FICHERO` o con la variable de entorno `BIOMETRIA_CONFIG`. Las
 rutas relativas se resuelven respecto a la carpeta del fichero. Al cargarse, la
 configuración se **valida**: un valor fuera de rango da un error claro
@@ -854,14 +885,14 @@ configuración se **valida**: un valor fuera de rango da un error claro
 | `detector` | `modelo` | `models/face_detection_yunet_2023mar.onnx` | Modelo del detector |
 | | `umbral_confianza` | 0,8 | Confianza mínima de YuNet para aceptar una cara |
 | | `umbral_nms` | 0,3 | Supresión de detecciones solapadas |
-| | `varias_caras` | `error` | `error` rechaza la foto; `mayor` usa la cara más grande |
+| | `varias_caras` | `mayor` | `error` rechaza la foto; `mayor` usa la cara más grande (dos fotos del Dataset tienen varias caras) |
 | `preprocesado` | `tam_cara` | `[112, 112]` | Tamaño de la cara alineada ([ancho, alto]) |
 | `calidad` | `tam_min_cara` | 60 | Lado mínimo de la cara (px) |
-| | `umbral_borrosidad` | 50 | Nitidez mínima (varianza del Laplaciano) |
+| | `umbral_borrosidad` | 40 | Nitidez mínima (varianza del Laplaciano) |
 | `extractor` | `nombre` | `arcface` | `arcface`, `sface` o `lbp` |
 | | `parametros` | `modelo: models/arcface_w600k_r50.onnx, voltear: true` | Parámetros del extractor. ArcFace: `modelo`, `voltear` (sumar la cara volteada). SFace: `modelo`. LBP: `radio`, `puntos`, `rejilla` ([columnas, filas]) |
-| `bd` | `ruta` | `data/bd.csv` | Dónde se guarda la base de datos |
-| | `ruta_clave` | `~/.jumex/clave_bd.key` | Fichero de la clave (si no hay variable de entorno). Fuera de `data/` |
+| `bd` | `ruta` | `data/lens/bd.csv` | Dónde se guarda la base de datos (la misma para CLI, Docker y web) |
+| | `ruta_clave` | `~/.jumex/clave_lens.key` | Fichero de la clave (si no hay variable de entorno). Fuera de `data/` |
 | | `cifrar_templates` | `true` | Cifrar los templates con AES-GCM |
 | | `anti_rollback` | `true` | Sello junto a la clave: detecta volver a una BD antigua o borrarla |
 | | `agregacion` | `max` | `max` o `media` de las muestras de una persona |
@@ -871,7 +902,8 @@ configuración se **valida**: un valor fuera de rango da un error claro
 | `limites` | `max_bytes_imagen` | 10 MiB | Tamaño máximo del fichero de imagen |
 | | `max_pixeles` | 25 Mpx | Tamaño máximo en píxeles |
 | | `max_muestras_por_id` | 10 | Muestras máximas por persona |
-| `defensa` | `coherencia_muestra` | 0,20 | Al añadir una muestra a alguien que ya existe, similitud mínima con las suyas (0 = desactivado). Contra el envenenamiento de la inscripción |
+| `defensa` | `coherencia_muestra` | 0,35 | Al añadir una muestra a alguien que ya existe, similitud mínima con su **primera** muestra (0 = desactivado). Contra el envenenamiento de la inscripción y la deriva con morphs |
+| | `ancla_muestra` | 0,20 | Al verificar o identificar, las muestras extra solo cuentan si la foto se parece al menos esto a la **primera** muestra (0 = desactivado). Una muestra envenenada no sirve para colar a otro |
 | | `decimales_puntuacion_t` | 2 | Decimales a los que se redondea la puntuación que devuelven los `_t` (0 = sin redondeo). Contra el hill-climbing |
 | | `max_intentos_t` | 50 | Máx. comparaciones `_t` por id en la ventana (0 = sin límite). Contra el hill-climbing |
 | | `ventana_intentos_s` | 60 | Ventana del límite anterior, en segundos |
@@ -882,9 +914,8 @@ configuración se **valida**: un valor fuera de rango da un error claro
 **Variables de entorno:** `BIOMETRIA_CONFIG` (configuración), `BIOMETRIA_HMAC_KEY`
 (clave de la BD) y `BIOMETRIA_ADMIN_PASS` (PIN de administrador de la web).
 
-`config_lens.yaml` cambia: `bd` en `data/lens/`, `varias_caras: mayor` y
-`umbral_borrosidad: 40` (más permisivo con fotos de internet y de la cámara del
-portátil); el extractor y los umbrales son los mismos. **Los umbrales están
+`config_lens.yaml` tiene los mismos valores (se mantiene para no romper los
+comandos con `--config config_lens.yaml`). **Los umbrales están
 calibrados con LFW** (ver [Cuánto acierta](#cuánto-acierta)) y conviene
 confirmarlos con las fotos del profesor. **Si se cambia de extractor hay que
 recalibrarlos**: cada técnica puntúa en una escala distinta.
@@ -905,18 +936,20 @@ completo, con cada defensa medida y probada con tests, está en
 | Amenaza | Qué hace el sistema |
 |---|---|
 | **Modifica o manipula `bd.csv`** (cambiar, copiar entre personas, borrar, duplicar o reordenar filas) | Lo detecta: firma HMAC por fila con su posición y el total → `integridad_bd`. No se puede inscribir encima de una BD manipulada |
-| **Envenenar la inscripción** (añadir mi cara como muestra de la víctima) | ✅ Se rechaza: la muestra nueva debe parecerse a las de esa persona (`coherencia_muestra`) → `muestra_incoherente` |
+| **Envenenar la inscripción** (añadir mi cara como muestra de la víctima, o llegar a ella con una cadena de morphs) | ✅ Se rechaza: la muestra nueva debe parecerse a la **primera** muestra de esa persona (`coherencia_muestra`) → `muestra_incoherente`; y las muestras extra no cuentan para quien no se parece a la primera (`ancla_muestra`) |
 | **Cualquiera inscribe/borra/lee por la web** | ✅ Dos roles: usuario (verificar/identificar) y **admin con PIN**; la BD solo la ve y toca el admin |
 | **Se salta el extractor** (`_t`) con un template fabricado o copiado de la BD | ✅ El sistema **firma** los templates que genera (`extraer` crea el `.sig`) y los `_t` **rechazan** los que no traen una firma válida → `template_no_firmado` |
-| **Hill-climbing** (ajustar un template probándolo hasta colarlo) | ✅ Cada variación pierde la firma y se rechaza sin dar puntuación. Además: redondeo y límite de intentos (este, solo dentro del servidor web) |
+| **Hill-climbing** (ajustar un template probándolo hasta colarlo) | ✅ Cada variación pierde la firma y se rechaza sin dar puntuación. El redondeo y el límite de intentos solo lo retrasan: sin firma, el ataque necesita unos cientos de consultas |
 | **Gemelos y dobles** | ✅ Si el 1.º y el 2.º candidato están a menos de 0,10, desconocido (`ambiguo`). ⚠️ No sirve si el gemelo no está inscrito |
 | **Lee `bd.csv`** | ✅ Templates cifrados con AES-256-GCM; la clave está fuera de `data/` |
-| **Restaura una BD antigua o la borra** | ✅ Sello anti-rollback junto a la clave → `integridad_bd` |
-| **Se salta el detector** (`_sd`) con algo que no es una cara | ✅ YuNet comprueba que hay una cara → `sin_cara` |
+| **Restaura una BD antigua o la borra** | ✅ Sello anti-rollback junto a la clave → `integridad_bd`. ⚠️ Si además borra el sello (necesita escribir en `~/.jumex/`), la copia antigua se acepta |
+| **Se salta el detector** (`_sd`, o la cara marcada a mano en la web) con algo que no es una cara | ✅ YuNet comprueba que hay una cara → `sin_cara` |
 | **Fuerza bruta del PIN, saturar o enumerar la web** | ✅ Bloqueo de PIN, sesión que caduca, límites por IP, timeouts, verificar sin revelar inscritos |
 | **Imágenes malintencionadas** | Límites de bytes y píxeles (doble), decodificación solo mediante OpenCV, nunca se cargan objetos con pickle |
 | **Nombres malintencionados** | Validación estricta de ids (sin saltos de línea, sin fórmulas de Excel, normalizados) |
 | **Foto de una foto, deepfake, máscara** | ⚠️ Sin detección de vivacidad: riesgo aceptado y documentado (paso 7) |
+| **Usa la foto exacta de `Dataset/`** (está en el repositorio) | ⚠️ Riesgo aceptado: se verifica con puntuación 1 |
+| **El rival ejecuta el sistema en su ordenador** | ⚠️ Tiene la clave: las defensas criptográficas no le afectan. Ver "Dos escenarios" en `THREAT_MODEL.md` |
 
 Las contramedidas están en las secciones `bd:` y `defensa:` de la configuración y
 **se pueden desactivar** para medir el sistema sin ellas. `python -m biometria bd`
@@ -948,12 +981,12 @@ enseña cuáles están activas, y `scripts/medir_defensas.py` mide su coste en L
 │       ├── analisis.py           pipeline paso a paso, varias caras, galería de fotos
 │       └── static/               interfaz: index.html, estilos.css, app.js, logo.svg
 ├── scripts/                      herramientas (ver "Scripts y herramientas")
-├── tests/                        195 tests con pytest
+├── tests/                        245 tests con pytest
 ├── docs/                         capturas para este README
 ├── data/                         (fuera de git) fotos, bases de datos, claves
 ├── models/                       (fuera de git) modelos descargados
 ├── config.yaml                   configuración por defecto (ArcFace)
-├── config_lens.yaml              configuración de la web (ArcFace, BD en data/lens/)
+├── config_lens.yaml              igual que config.yaml (se mantiene por compatibilidad)
 ├── Dockerfile
 └── requirements*.txt             dependencias con versiones fijadas
 ```
@@ -962,7 +995,7 @@ enseña cuáles están activas, y `scripts/medir_defensas.py` mide su coste en L
 
 ## Tests
 
-`pytest -q` ejecuta **195 tests** en unos 15 segundos. Cubren:
+`pytest -q` ejecuta **245 tests** en unos 20-25 segundos (también dentro del Docker). Cubren:
 
 | Fichero | Qué comprueba |
 |---|---|
@@ -984,6 +1017,11 @@ Algunos tests necesitan los modelos (`descargar_modelos.py`) y red la primera ve
 
 ## Estado del proyecto y trabajo pendiente
 
+**Personas inscritas: 50.** El enunciado habla de 51 (50 del docente + 1 del
+equipo), pero el docente aclaró que son **50**: las **49** fotos que entregó
+(`Dataset/`) y **una elegida por cada equipo**. La nuestra es **Lionel Messi**
+(`Dataset/lionel_messi_*.jpg`, id `Lionel Messi`).
+
 | Fase | Rama | Contenido | Estado |
 |---|---|---|---|
 | 1 | `setup-base` | Estructura, dependencias, Docker, configuración | ✅ |
@@ -993,19 +1031,20 @@ Algunos tests necesitan los modelos (`descargar_modelos.py`) y red la primera ve
 | 5 | `sistema-cli` | `SistemaBiometrico` con los 9 métodos y la CLI | ✅ |
 | extra | `web`, `web-v2` | SFace, JumeX Lens, varias caras, ficha editable, Cloudflare Tunnel | ✅ |
 | — | `arcface` | **ArcFace como extractor principal**, umbrales calibrados (`evaluar.py`), migración de la BD, cámara en la web, "los más parecidos" filtrados | ✅ |
-| 6 | `inscripcion-evaluacion` | Inscripción masiva de las 51 personas; FAR/FRR/EER, curvas DET/ROC y CMC | ⏳ |
+| 6 | `inscripcion-evaluacion` | Inscripción de las 50 personas ✅; FAR/FRR/EER ✅, curvas DET/ROC y CMC | ⏳ |
 | 7 | `seguridad` | `THREAT_MODEL.md` y contramedidas (pasos 1–8 y riesgos aceptados) | ✅ |
 
 **Pendiente:**
-- **Las 50 fotos del profesor** y nuestra persona número 51 (se puede capturar con la cámara de la web o con `python -m biometria.camara`), y **confirmar con ellas los umbrales** calibrados en LFW.
-- **El resto de la evaluación** (fase 6): `scripts/evaluar.py` ya da FAR/FRR/EER y rank-1; faltan las **curvas** DET/ROC y CMC.
-- **Probar el Docker** (no se ha construido en la máquina de desarrollo).
+- **El resto de la evaluación** (fase 6): `scripts/evaluar.py` ya da FAR/FRR/EER y rank-1; faltan las **curvas** DET/ROC y CMC, separar sujetos de calibración y de test, y medir los `_sd` y la galería real (hoy hay una sola foto por persona).
+- **La evaluación del grupo rival** (fase 3 del enunciado).
 
-**Limitaciones conocidas:**
-- No se comprueba al inscribir que la cara **no esté ya inscrita con otro nombre** (ni que una muestra nueva se parezca a las anteriores de esa persona: se pueden inscribir caras distintas bajo el mismo nombre).
+**Limitaciones conocidas** (el detalle, con lo medido, en [`THREAT_MODEL.md`](THREAT_MODEL.md), riesgos aceptados):
 - **Sin detección de vivacidad:** una foto de una foto, o una imagen de una pantalla, se trata como una cara real.
-- La web no tiene contraseña ni límite de intentos, y no funciona en Docker.
-- Las ramas están subidas a GitHub como ramas de trabajo; `main` aún no las incluye.
+- **Las fotos de inscripción están en el repositorio** (`Dataset/`): quien lo tenga puede verificarse como cualquiera con su foto exacta.
+- **Si el sistema se ejecuta en el ordenador del atacante**, la clave es suya: el cifrado, la firma de templates y el sello no le frenan.
+- **Gemelos no inscritos** (Aitana Etxebarria, James Phelps, Mary-Kate Olsen): el gemelo puede pasar por su hermano.
+- **Una cara ya inscrita con otro nombre** no se detecta: si alguien la inscribe (admin o inscripción abierta), la identificación de esa persona sale `ambiguo`.
+- Algunos ids tienen erratas que vienen de los nombres de fichero del Dataset (`Arianna Grande`, `Serenna Williams`, `Wiliem Dafoe`…) y los ids distinguen mayúsculas: hay que escribir el nombre exactamente como sale en `python -m biometria bd`.
 
 ---
 
@@ -1020,7 +1059,7 @@ Decisiones tomadas donde el enunciado es ambiguo o deja libertad:
 
 **Detección y preprocesado**
 4. **YuNet en vez de MTCNN** (integrado en OpenCV, ligero, sin PyTorch/TensorFlow).
-5. **Varias caras:** por defecto se rechaza la foto (`error`) para no inscribir o verificar a la persona equivocada; la web usa `mayor`.
+5. **Varias caras:** se usa la cara más grande (`mayor`), igual en la CLI y en la web, porque dos fotos del Dataset tienen más de una cara. Con `varias_caras: error` se rechaza la foto.
 6. **Alineado con los 5 puntos**, no solo con los ojos: es una transformación de similitud (rotación + escala + traslación) estimada con LMEDS, más estable si un punto sale mal.
 7. **Calidad medida donde importa:** el tamaño sobre la caja de la imagen original; la nitidez sobre la cara ya alineada, para que no dependa de la resolución de la foto.
 8. **Detección multiescala:** YuNet no ve las caras que ocupan más del ~40 % de su entrada, así que se detecta también a 640 y 320 px y se fusiona.
@@ -1030,7 +1069,7 @@ Decisiones tomadas donde el enunciado es ambiguo o deja libertad:
 10. **Toda puntuación está en [0, 1] y "más alto = más parecido"**, sea cual sea el extractor.
 11. **Los templates que llegan de fuera se validan** siempre (dimensión, valores finitos, rangos), pero eso no impide un template fabricado a medida.
 12. **LBP con numpy, sin scikit-image**, para no añadir una dependencia pesada.
-13. **Puntuación frente a una persona = máximo entre sus muestras** (o media, configurable).
+13. **Puntuación frente a una persona = máximo entre sus muestras** (o media, configurable), pero **anclada a la primera**: si la foto no llega a `ancla_muestra` con la primera muestra, las demás no cuentan. Así añadir muestras ayuda a la persona real (fotos de otra época) y no a quien la suplanta.
 14. **Se devuelve la puntuación y no solo la decisión**: hace falta para la evaluación (curvas DET/ROC) y para que el rival pueda medir el sistema; a cambio facilita el *hill-climbing*.
 15. **Los umbrales se separan por operación**: la identificación es más exigente que la verificación.
 
@@ -1045,7 +1084,7 @@ Decisiones tomadas donde el enunciado es ambiguo o deja libertad:
 **Plataforma**
 22. **`verificar` comprueba que el id existe antes de procesar la foto**; **los métodos `_t` no cargan el detector**.
 23. **Versiones fijadas** (numpy 2.4.x, OpenCV 4.14 **completo**, no *headless*, porque la demo de cámara necesita `cv2.imshow`). Pensadas para Python 3.11 (la imagen de Docker); también funcionan en versiones posteriores.
-24. **La web usa su propia base de datos** (`data/lens/`), para no mezclar a las personas de la demo con el `data/bd.csv` de la práctica. Usa el mismo extractor (ArcFace) y los mismos umbrales.
+24. **Una sola base de datos** (`data/lens/bd.csv`) para la CLI, el Docker y la web: es la que crea `docker compose up` con `Dataset/`, así el profesor y el rival prueban lo mismo con cualquier interfaz. (Antes la CLI usaba un `data/bd.csv` aparte que nadie creaba.)
 25. **ArcFace con `cv2.dnn`** y no con onnxruntime o PyTorch: no añade dependencias, y OpenCV ya está fijado en una versión.
 26. **Similitud de ArcFace = `max(coseno, 0)`** en vez de `(coseno + 1)/2`: así el porcentaje se lee de forma intuitiva (desconocidos ≈ 0 %) y la web no enseña a desconocidos como "parecidos al 50 %".
 27. **Umbral `parecido` aparte de los de decisión**: solo afecta a qué se enseña, nunca a si se acepta o se identifica a alguien.
@@ -1058,7 +1097,7 @@ Decisiones tomadas donde el enunciado es ambiguo o deja libertad:
 - **`Address already in use` al arrancar la web:** queda un servidor anterior abierto. En macOS el proceso se llama `Python` (con mayúscula): `lsof -nP -iTCP:8000 -sTCP:LISTEN` te dice su PID y `kill <PID>` lo cierra. O arranca en otro puerto con `--puerto 8080`.
 - **`CERTIFICATE_VERIFY_FAILED` al descargar modelos en macOS:** el Python de python.org no trae certificados. Ejecuta `/Applications/Python\ 3.11/Install\ Certificates.command` o lanza el script con `SSL_CERT_FILE=/etc/ssl/cert.pem`.
 - **`integridad_bd` sin haber tocado nada:** la clave no es la que firmó la BD (se perdió `~/.jumex/clave_*.key`, o `BIOMETRIA_HMAC_KEY` es otra). Si dice **rollback**, el CSV no es el último que escribió el sistema: alguien lo ha sustituido por una copia. La BD no se puede recuperar sin su clave: hay que inscribir de nuevo.
-- **Un error dice que la BD se creó con otro extractor:** los templates guardados no tienen la dimensión del extractor actual (p. ej. una BD de SFace o LBP abierta con ArcFace). Para la web, `python scripts/migrar_extractor.py` la rehace a partir de las fotos de la galería (con respaldo). Para `data/bd.csv`, que no guarda fotos, hay que inscribir de nuevo.
+- **Un error dice que la BD se creó con otro extractor:** los templates guardados no tienen la dimensión del extractor actual (p. ej. una BD de SFace o LBP abierta con ArcFace). Para la web, `python scripts/migrar_extractor.py` la rehace a partir de las fotos de la galería (con respaldo). Si la BD no tiene fotos en la galería, hay que inscribir de nuevo.
 - **La cámara de la web no se abre:** comprueba que entras por `http://127.0.0.1:8000` o `localhost` (no por la IP de la red local) o por la URL `https` del túnel; que no la tiene ocupada otra aplicación (Zoom, Teams…); y que el navegador tiene permiso (candado de la barra de direcciones).
 - **La demo `python -m biometria.camara` no abre la cámara:** en macOS hay que dar permiso a la terminal o a VS Code en *Ajustes del Sistema → Privacidad y seguridad → Cámara*. Docker en macOS no ve la cámara.
 - **La web no abre una foto del iPhone:** las fotos HEIC no están soportadas; expórtala como JPG.

@@ -75,6 +75,63 @@ def test_coherencia_desactivada_deja_pasar_el_ataque(cfg, tmp_path, monkeypatch,
     assert sistema.inscribir_t("Eileen Collins", ajena).muestras == 2  # entra sin problema
 
 
+def _deriva(sistema, victima, atacante, pasos=8):
+    """Ataque de la revisión (A4): una cadena de morphs víctima -> atacante añadidos
+    como muestras de la víctima. Devuelve cuántos se aceptan."""
+    aceptados = 0
+    for alfa in np.linspace(0.1, 0.9, pasos):
+        morph = (1 - alfa) * victima + alfa * atacante
+        try:
+            sistema.inscribir_t("Victima", (morph / np.linalg.norm(morph)).astype(np.float32))
+            aceptados += 1
+        except MuestraIncoherente:
+            pass
+    return aceptados
+
+
+def test_deriva_con_morphs_no_cuela_al_atacante(cfg_tmp):
+    """Coherencia contra la PRIMERA muestra + ancla: los morphs cercanos a la víctima
+    pueden entrar, pero no sirven para que el atacante se verifique como ella."""
+    sistema = SistemaBiometrico(cfg_con(cfg_tmp, defensa={
+        "coherencia_muestra": 0.35, "ancla_muestra": 0.20, "exigir_firma_t": False}))
+    victima, atacante = _vector(30), _vector(31)
+    sistema.inscribir_t("Victima", victima)
+    aceptados = _deriva(sistema, victima, atacante)
+    assert 0 < aceptados < 8  # los que se alejan de la inscripción original se rechazan
+    assert not sistema.verificar_t("Victima", atacante, _contar=False).aceptado
+    assert sistema.identificar_t(atacante, _contar=False).id is None
+    assert sistema.verificar_t("Victima", victima, _contar=False).aceptado  # la víctima sigue
+
+
+def test_sin_ancla_la_deriva_si_cuela_al_atacante(cfg_tmp):
+    """Prueba de que es el ancla la que para el ataque: sin ella, un morph aceptado
+    (parecido a víctima y atacante) basta para verificar al atacante."""
+    sistema = SistemaBiometrico(cfg_con(cfg_tmp, defensa={
+        "coherencia_muestra": 0.35, "ancla_muestra": 0.0, "exigir_firma_t": False}))
+    victima, atacante = _vector(30), _vector(31)
+    sistema.inscribir_t("Victima", victima)
+    _deriva(sistema, victima, atacante)
+    assert sistema.verificar_t("Victima", atacante, _contar=False).aceptado
+
+
+def test_coherencia_compara_con_la_primera_muestra(cfg_tmp):
+    """Una muestra parecida a la ÚLTIMA añadida pero no a la primera se rechaza
+    (antes bastaba con parecerse a cualquiera: así funcionaba la deriva)."""
+    sistema = SistemaBiometrico(cfg_con(cfg_tmp, defensa={
+        "coherencia_muestra": 0.35, "ancla_muestra": 0.0, "exigir_firma_t": False}))
+    a, b = _vector(40), _vector(41)
+    paso1 = 0.6 * a + 0.4 * b
+    paso1 /= np.linalg.norm(paso1)
+    paso2 = 0.25 * a + 0.75 * b
+    paso2 /= np.linalg.norm(paso2)
+    sistema.inscribir_t("P", a)
+    sistema.inscribir_t("P", paso1)                      # cerca de la primera: entra
+    assert float(np.dot(paso2, paso1)) > 0.35            # se parece a la última...
+    assert float(np.dot(paso2, a)) < 0.35                # ...pero no a la primera
+    with pytest.raises(MuestraIncoherente):
+        sistema.inscribir_t("P", paso2)
+
+
 # --- Paso 2: firma de templates (contra templates fabricados en _t) ----------
 
 def test_firma_distingue_template_propio_de_fabricado(cfg_tmp, ruta_astronauta):

@@ -29,6 +29,27 @@ la **clave maestra**. Por eso la clave vive **fuera** de la carpeta de datos
 (`~/.jumex/`, o la variable de entorno `BIOMETRIA_HMAC_KEY`): leer o escribir
 `data/` no da la clave.
 
+## Dos escenarios: ¿quién ejecuta el sistema?
+
+La suposición anterior solo se cumple si el sistema corre en una máquina **nuestra**.
+Para la evaluación del rival hay dos maneras de hacerlo, y no protegen lo mismo:
+
+| | **1 · Rival remoto** (usa nuestra web o una máquina nuestra) | **2 · Rival operador** (`git clone` + `docker compose up` en su ordenador) |
+|---|---|---|
+| Clave maestra | Nuestra, en nuestro `~/.jumex/` | **Suya**: se genera aleatoria en su `~/.jumex/` |
+| Cifrado, HMAC por fila, sello (paso 6) | ✅ Le impiden leer y manipular la BD | ❌ Descifra, vuelve a firmar filas y regenera el sello |
+| Firma de templates en `_t` (pasos 2 y 3) | ✅ No puede fabricar ni ajustar templates | ❌ `SistemaBiometrico.firmar()` le firma lo que quiera |
+| Roles y PIN de la web (paso R y 8) | ✅ | ❌ El PIN sale en su consola |
+| Coherencia y ancla de las muestras (paso 1) | ✅ | ✅ Siguen valiendo **si usa los métodos** del sistema; si edita el código o la BD con la clave, no |
+| Margen de gemelos (paso 4), cara en `_sd` (paso 5), validación de entradas | ✅ | ✅ Igual que arriba |
+
+**Conclusión.** Las defensas criptográficas protegen el escenario 1. En el 2 el
+rival es, a todos los efectos, el administrador: lo que se evalúa entonces es el
+**reconocimiento** (FAR/FRR, gemelos, presentación, morphs, adversarios) y las
+defensas que no dependen de un secreto. Proponemos al rival evaluar los dos: el
+escenario 1 con nuestra web publicada (`docker compose --profile publico up
+web-publico`) y el 2 con su propio clon.
+
 ## Las defensas, de un vistazo
 
 Todas las contramedidas viven en las secciones `bd:` y `defensa:` de la
@@ -36,14 +57,14 @@ configuración y **se pueden desactivar**, para medir el sistema sin ellas.
 
 | # | Ataque | Defensa | Estado |
 |---|---|---|---|
-| 1 | Envenenar la inscripción (añadir mi cara como muestra de la víctima) | `coherencia_muestra`: la muestra nueva debe parecerse a las anteriores | ✅ |
+| 1 | Envenenar la inscripción (añadir mi cara como muestra de la víctima, o una cadena de morphs) | `coherencia_muestra` contra la **primera** muestra + `ancla_muestra` al verificar e identificar | ✅ |
 | R | Cualquiera inscribe, borra o lee la BD por la web | Dos roles: usuario (verificar/identificar) y admin con PIN | ✅ |
 | 2 | Template fabricado o copiado de la BD en `_t` | Firma HMAC de los templates; `_t` **rechaza** los no firmados | ✅ |
 | 3 | Hill-climbing con la puntuación | Firma obligatoria + redondeo + límite de intentos | ✅ |
 | 4 | Gemelos y dobles en identificación | Margen mínimo entre el 1.º y el 2.º candidato | ✅ (parcial, ver riesgos) |
-| 5 | `_sd` con una imagen que no es una cara | YuNet comprueba que hay una cara (sin alinear) | ✅ |
+| 5 | `_sd` (o la cara marcada a mano en la web) con una imagen que no es una cara | YuNet comprueba que hay una cara (sin alinear) | ✅ |
 | 6 | Leer la BD, escribirla con la clave al lado, rollback, escrituras a la vez | Clave aparte, cifrado AES-GCM, sello anti-rollback, bloqueo de fichero | ✅ |
-| 7 | Foto de una foto, pantalla, máscara (presentación) | Sin vivacidad: riesgo aceptado y documentado | ⚠️ |
+| 7 | Foto de una foto, pantalla, máscara (presentación), o la foto exacta de `Dataset/` | Sin vivacidad: riesgo aceptado y documentado | ⚠️ |
 | 8 | Fuerza bruta del PIN, saturar el servidor, robar la sesión, enumerar nombres | Bloqueo del PIN, sesión que caduca, límites por IP, timeouts, respuesta uniforme | ✅ |
 
 `python -m biometria bd` enseña qué protecciones están activas.
@@ -62,26 +83,45 @@ el del atacante.
 envenenada para que el atacante **verifique y se identifique como la víctima**
 para siempre.
 
-**La defensa.** Al **añadir** una muestra a una persona que **ya existe**, el
-nuevo template debe parecerse a los que ya tiene, al menos
-`defensa.coherencia_muestra` (0,20). Si no, error `muestra_incoherente`. Está en
-`SistemaBiometrico._inscribir`, así que cubre `inscribir`, `inscribir_sd`,
-`inscribir_t` y la web. No se aplica a la primera muestra de una persona nueva:
-no hay con qué comparar.
+**La primera defensa, y cómo cayó.** Al principio, la muestra nueva tenía que
+parecerse al menos 0,20 a la **más parecida** de las que ya tenía la persona. Eso
+frena una cara ajena directa, pero la revisión del 23/11 lo rompió con una
+**deriva de morphs**: 8 mezclas progresivas víctima → atacante (fundido de las dos
+caras alineadas, del 12 % al 96 %), cada una parecida a la anterior. Se aceptaron
+**las 8 en las 8 parejas probadas**, y después otra foto del atacante se verificaba
+como la víctima con 0,92–0,98 (antes 0,00–0,06), sin que la víctima notara nada.
 
-**Por qué 0,20.** Medido en LFW (200 personas):
+**Las defensas actuales.**
 
-| Umbral | Rechaza muestras legítimas | Deja pasar caras ajenas |
-|---|---|---|
-| 0,15 | 0,8 % | 0,75 % |
-| **0,20** | **1,1 %** | **0,095 %** |
-| 0,25 | 1,1 % | 0,016 % |
+1. **Coherencia contra la primera muestra** (`defensa.coherencia_muestra: 0.35`).
+   Al **añadir** una muestra a una persona que **ya existe**, el nuevo template
+   tiene que parecerse a su **primera** muestra (la inscripción original), no a la
+   más parecida, y tanto como para verificarse (mismo umbral que verificación; en
+   LFW solo el 0,22–0,85 % de los pares genuinos queda por debajo). La cadena de
+   morphs se corta en cuanto se aleja de la original. Si no, `muestra_incoherente`.
+   Está en `SistemaBiometrico._inscribir`, así que cubre `inscribir`,
+   `inscribir_sd`, `inscribir_t` y la web. No se aplica a la primera muestra de una
+   persona nueva: no hay con qué comparar.
+2. **Ancla al puntuar** (`defensa.ancla_muestra: 0.20`). La coherencia sola no basta:
+   un morph al ~70 % se parece a la víctima lo bastante para entrar (≈0,4) y al
+   atacante casi como él mismo (≈0,9), y verificar usa la muestra más parecida. Por
+   eso, al verificar o identificar, **las muestras extra solo cuentan si la foto se
+   parece al menos 0,20 a la primera muestra**; si no, la puntuación es la de la
+   primera. Al atacante (0,00–0,06 contra la original) no le sirve ningún morph; a
+   la persona real, sus fotos extra le siguen ayudando (fotos de otra época, otra
+   luz). En LFW, solo el 0,12 % de los impostores llega a 0,20 con la víctima.
 
 **Límite conocido.** No para a quien envenena con una cara que **de verdad se
-parece** a la víctima (un gemelo, un morph bien hecho).
+parece** a la víctima (un gemelo, un morph que ya supera 0,35 con la original), ni
+a quien edita la BD con la clave (escenario 2). La primera muestra de cada persona
+es la raíz de confianza.
 
-**Cómo se comprueba.** `test_defensas.py::test_coherencia_bloquea_envenenamiento`
-y `::test_coherencia_desactivada_deja_pasar_el_ataque`.
+**Cómo se comprueba.** `test_defensas.py::test_coherencia_bloquea_envenenamiento`,
+`::test_coherencia_desactivada_deja_pasar_el_ataque`,
+`::test_coherencia_compara_con_la_primera_muestra`,
+`::test_deriva_con_morphs_no_cuela_al_atacante` y
+`::test_sin_ancla_la_deriva_si_cuela_al_atacante` (prueba de que es el ancla la
+que lo para).
 
 ---
 
@@ -95,8 +135,10 @@ fotos y porcentajes de parecido.
 
 - **Usuario** (por defecto, sin PIN): **verifica** e **identifica**. Ve el
   veredicto, el nombre y el porcentaje, pero **no la foto guardada ni la lista de
-  parecidos**. No puede inscribir, borrar ni abrir "Base de datos", y
-  `GET /api/estado` no le dice cuánta gente hay ni con qué umbrales.
+  parecidos**, ni los valores del template, ni cuánta gente hay inscrita (tampoco
+  en las respuestas de verificar e identificar, ni en las de error). No puede
+  inscribir, borrar ni abrir "Base de datos", y `GET /api/estado` no le dice cuánta
+  gente hay ni con qué umbrales.
 - **Administrador** (con PIN): además inscribe, edita, borra y ve la BD.
 
 El rol se comprueba **en el servidor, en cada endpoint**: sin sesión,
@@ -156,8 +198,11 @@ la clave va aparte (paso 6).
 **El ataque.** El sistema **devuelve la puntuación** (hace falta para evaluarlo).
 Un atacante parte de un vector cualquiera y, probándolo por `verificar_t`, se
 queda con cada variación que **sube** la puntuación hasta superar el umbral.
-Medido: partiendo de ruido supera 0,35 en **15 000 a 36 000 consultas (1 a 3 s)**,
-sin saber nada de la víctima.
+Medido: partiendo de ruido, con perturbaciones aleatorias de tamaño ajustado,
+supera 0,35 en **216 consultas** (393 con la puntuación redondeada a 2 decimales),
+en menos de un segundo y sin saber nada de la víctima. (Una primera medición, con
+pasos peores, daba 15 000–36 000: el ataque es bastante más barato de lo que
+parecía.)
 
 **Las defensas, y cuál para de verdad el ataque.**
 
@@ -166,13 +211,18 @@ sin saber nada de la víctima.
    El atacante no obtiene ninguna puntuación que lo guíe.
 2. **Redondeo** a `decimales_puntuacion_t` (2) de la puntuación que sale por
    `_t`. La decisión se toma con la puntuación exacta. **Solo, no basta**: medido,
-   con 2 decimales el ataque sigue funcionando (3 de 3 intentos, ~16 000–36 000
-   consultas).
+   con 2 decimales el ataque sigue funcionando (393 consultas en vez de 216).
 3. **Límite de intentos**: `max_intentos_t` (50) por id cada `ventana_intentos_s`
    (60 s), error `demasiados_intentos` (429 en la web). Ojo: es **por proceso y
    en memoria**. Protege al servidor web, que vive mucho tiempo, pero **no a la
    CLI**: cada `python -m biometria verificar_t` es un proceso nuevo con el
-   contador a cero. En la CLI quien para el ataque es la firma.
+   contador a cero. En la CLI quien para el ataque es la firma. Y aun en la web,
+   393 consultas a 50 por minuto son unos 8 minutos: el límite solo lo retrasa.
+
+**Si se desactiva la firma** (`exigir_firma_t: false`, por ejemplo para que el
+profesor o el rival prueben templates de fuera), el hill-climbing vuelve a ser
+trivial. En ese caso conviene no devolver la puntuación por `_t` o redondearla a
+1 decimal.
 
 **Lo que queda.** Un hill-climbing con **fotos** (modificar una imagen poco a
 poco por `verificar`) no lo para la firma: cada foto es legítima. Necesita
@@ -232,7 +282,14 @@ enunciado. Si no hay cara: `sin_cara`.
 | Ruido, colores lisos y degradados | **600/600 rechazados (100 %)** |
 | Trozos de fondo de fotos reales | 1062/1072 rechazados (99,1 %) |
 
-**Cómo se comprueba.** `test_defensas.py::test_sd_rechaza_lo_que_no_es_una_cara`.
+**La misma comprobación en la web.** Al marcar la cara a mano (`?caja=x,y,w,h`), si
+YuNet no encuentra sus puntos dentro del recuadro, este se usa sin alinear, como
+en `_sd`. Antes eso se hacía **sin** comprobar que hubiera una cara: la revisión
+mandó ruido con `caja=0,0,400,400` y llegó al extractor (puntuación 0,15 al
+identificar). Ahora ese recorte pasa por la misma comprobación (`sin_cara`).
+
+**Cómo se comprueba.** `test_defensas.py::test_sd_rechaza_lo_que_no_es_una_cara` y
+`test_web.py::test_web_caja_manual` (recuadro sin cara y ruido con `caja`).
 
 ---
 
@@ -270,7 +327,10 @@ enunciado. Si no hay cara: `sin_cara`.
 Antes de reescribir siempre se verifica el fichero entero: nunca se vuelve a
 firmar contenido manipulado.
 
-**Qué NO resuelve.** Quien tenga la clave (o pueda escribir en `~/.jumex/`) puede
+**Qué NO resuelve.** Si se **borra el sello** (`~/.jumex/sello-*.json`) y se pone
+una copia antigua de la BD, el sistema no tiene con qué compararla y se fía del CSV
+que encuentra: medido, una BD de 48 personas sustituyó a la de 49 sin aviso. Hace
+falta poder escribir en `~/.jumex/`, no la clave. Además, quien tenga la clave (o pueda escribir en `~/.jumex/`) puede
 falsificarlo todo. En Windows no hay `flock` (la escritura sigue siendo atómica).
 Si el proceso muere en mitad de una escritura, el sello admite dos versiones
 hasta la siguiente escritura.
@@ -297,8 +357,11 @@ dataset son fotos), así que cualquier comprobación de vivacidad solo tendría
 sentido en la cámara de la web, y el atacante podría seguir subiendo una foto.
 
 **Lo que sí hay.** Las fotos pasan controles de calidad (cara mínima, nitidez) y
-el usuario de la web no ve las fotos de la BD, así que no puede sacar de ahí la
-foto de la víctima. **Es un riesgo aceptado**: ver abajo.
+el usuario de la web no ve las fotos de la BD. **Pero las fotos con las que se
+inscribió a cada persona están en el repositorio** (`Dataset/`, para que `docker
+compose up` cree la BD solo): con ellas, verificar da **1,00** para cualquiera de
+los 49 (medido), y también pasan recomprimidas, en espejo, giradas, en gris o con
+otra luz (siempre ≥ 0,77). **Es un riesgo aceptado**: ver abajo.
 
 ---
 
@@ -357,3 +420,22 @@ Los decimos nosotros antes de que los encuentre el equipo rival.
    raíz de confianza.
 8. **La primera muestra de una persona** no se comprueba con nada: si el admin
    inscribe a alguien con la foto equivocada, el sistema la cree.
+9. **Las fotos de inscripción están en el repositorio** (`Dataset/`). Se decidió así
+   para que `docker compose up` cree la BD sin pasos manuales; el repositorio es
+   privado y son fotos públicas de famosos, pero el rival las tiene. Con la foto
+   exacta de una persona, `verificar` da **1,00** (medido con las 49), y las
+   variantes de esa foto también pasan. Mitigación posible, no implementada:
+   rechazar las comparaciones casi idénticas (≥ 0,97–0,99) a una muestra guardada.
+10. **El rival como operador** (ver "Dos escenarios"): si ejecuta el sistema en su
+    ordenador, la clave es suya y las defensas de los pasos 2, 3, 6 y 8 no le afectan.
+11. **Borrar el sello** y restaurar una copia antigua de la BD (paso 6): sin sello,
+    se confía en el CSV actual. Hace falta escribir en `~/.jumex/`.
+12. **La misma cara con otro nombre.** La coherencia solo mira las muestras de la
+    **misma** persona. Si alguien inscribe la foto de la víctima con otro nombre (el
+    admin, o cualquiera con `--inscripcion-abierta`), identificar a la víctima da
+    `ambiguo` → desconocido (medido: `id: null, ambiguo: true`); verificar sigue
+    funcionando. Mitigación posible, no implementada: al crear un id nuevo,
+    identificar antes y rechazar si alguien supera el umbral.
+13. **Ids exactos.** Los ids distinguen mayúsculas y salen del nombre de fichero del
+    Dataset, con sus erratas (`Arianna Grande`, `Serenna Williams`…): verificar
+    con el nombre bien escrito da un rechazo que no es culpa del reconocimiento.

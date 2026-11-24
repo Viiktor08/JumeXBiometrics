@@ -126,6 +126,14 @@ def test_analizar_guarda_cada_paso(cfg, tmp_path, detector, ruta_astronauta, mon
 
 # --- Servidor ------------------------------------------------------------------------
 
+def _bd_temporal(texto: str, ruta_bd) -> str:
+    """Pone la BD de una copia de config.yaml en una ruta temporal (y comprueba que lo ha hecho:
+    si la línea `ruta:` cambiara de forma, el test escribiría en la BD real)."""
+    nuevo = re.sub(r"(?m)^  ruta: \S+", lambda _: f"  ruta: {ruta_bd}", texto)
+    assert str(ruta_bd) in nuevo
+    return nuevo
+
+
 @pytest.fixture
 def config_web(tmp_path, monkeypatch, detector):
     """config.yaml del repo (ArcFace) con la BD en una carpeta temporal."""
@@ -133,7 +141,7 @@ def config_web(tmp_path, monkeypatch, detector):
         pytest.skip("Falta el modelo ArcFace: python scripts/descargar_modelos.py")
     monkeypatch.delenv(VARIABLE_CLAVE, raising=False)
     texto = (RAIZ_REPO / "config.yaml").read_text(encoding="utf-8")
-    texto = texto.replace("ruta: data/bd.csv", f"ruta: {tmp_path / 'bd.csv'}")
+    texto = _bd_temporal(texto, tmp_path / "bd.csv")
     re_clave = f"ruta_clave: {tmp_path / 'k.key'}"
     texto = re.sub(r"ruta_clave: \S+", lambda _: re_clave, texto)
     texto = texto.replace("modelo: models/", f"modelo: {RAIZ_REPO / 'models'}/")
@@ -261,9 +269,13 @@ def test_web_caja_manual(servidor, ruta_astronauta, astronauta, detector):
     _, r, _ = peticion(servidor, "POST", f"/api/analizar?caja={x + 8},{y + 8},{w - 16},{h - 16}", foto)
     assert r["ok"] and r["seleccion"] == "manual" and r["detecciones"][0]["elegida"]
     assert "resultado" in r and r["resultado"] == {}
-    # Recuadro sin cara: se usa tal cual, sin alinear
+    # Recuadro sin cara: no se alinea, pero tiene que ser una cara (como en _sd, paso 5)
     _, r, _ = peticion(servidor, "POST", "/api/analizar?caja=0,300,120,120", foto)
-    assert r["ok"] and r["seleccion"] == "manual_sin_puntos" and r["region"] == [0, 300, 120, 120]
+    assert not r["ok"] and r["error"]["error"] == "sin_cara" and r["seleccion"] == "manual_sin_puntos"
+    # Ruido con la "cara" marcada a mano: antes llegaba al extractor (M7 de la revisión)
+    ruido = cv2.imencode(".png", (np.random.default_rng(0).random((400, 400, 3)) * 255).astype(np.uint8))[1]
+    _, r, _ = peticion(servidor, "POST", "/api/identificar?caja=0,0,400,400", ruido.tobytes())
+    assert not r["ok"] and r["error"]["error"] == "sin_cara" and "resultado" not in r
     # Recuadros inválidos
     assert peticion(servidor, "POST", "/api/analizar?caja=1,2,3", foto)[0] == 400
     assert peticion(servidor, "POST", "/api/analizar?caja=nan,0,50,50", foto)[0] == 400
@@ -356,7 +368,7 @@ def test_web_ficha_y_edicion_de_persona(admin, ruta_astronauta, astronauta):
 def test_web_dominio_del_tunel(tmp_path, monkeypatch, detector):
     monkeypatch.delenv(VARIABLE_CLAVE, raising=False)
     texto = (RAIZ_REPO / "config.yaml").read_text(encoding="utf-8")
-    texto = texto.replace("ruta: data/bd.csv", f"ruta: {tmp_path / 'bd.csv'}")
+    texto = _bd_temporal(texto, tmp_path / "bd.csv")
     re_clave = f"ruta_clave: {tmp_path / 'k.key'}"
     texto = re.sub(r"ruta_clave: \S+", lambda _: re_clave, texto)
     texto = texto.replace("modelo: models/", f"modelo: {RAIZ_REPO / 'models'}/")
@@ -451,10 +463,17 @@ def test_usuario_identifica_pero_sin_foto_ni_candidatos(servidor, ruta_astronaut
     assert res["puntuacion"] is not None          # el veredicto sí
     assert "foto" not in res                        # pero no la foto de la BD
     assert "candidatos" not in res                  # ni la lista de parecidos
+    assert "personas" not in res                    # ni cuánta gente hay inscrita
+    assert r["template"] == {"dimension": 512}      # ni los valores del template
 
     # Verificar como usuario: aceptado, sin foto de la BD
     _, r, _ = peticion(servidor, "POST", "/api/verificar?id=Eileen%20Collins", foto)
     assert r["resultado"]["aceptado"] is True and "foto" not in r["resultado"]
+    assert "valores" not in r["template"]
+
+    # El admin sí lo ve todo
+    _, r, _ = peticion(servidor, "POST", "/api/identificar", foto, cab)
+    assert r["resultado"]["personas"] == 1 and len(r["template"]["valores"]) == 512
 
 
 # --- Inscripción abierta temporal (el "+") ---------------------------------------------------

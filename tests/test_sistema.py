@@ -78,10 +78,11 @@ def test_id_invalido_antes_de_procesar_la_foto(sistema):
         sistema.inscribir("=1+1", "no_existe.jpg")
 
 
-def test_errores_del_detector_llegan_al_llamador(sistema, astronauta):
+def test_errores_del_detector_llegan_al_llamador(sistema, cfg_tmp, astronauta):
     doble = np.hstack([astronauta, astronauta])
+    estricto = SistemaBiometrico(cfg_con(cfg_tmp, detector={"varias_caras": "error"}))
     with pytest.raises(VariasCaras):
-        sistema.inscribir("Eileen", doble)
+        estricto.inscribir("Eileen", doble)
     with pytest.raises(ImagenInvalida):
         sistema.inscribir("Eileen", b"esto no es una imagen")
     assert not sistema.bd.ruta.exists()  # nada se ha inscrito
@@ -187,7 +188,8 @@ def config_yaml(cfg_tmp, tmp_path):
     ruta = tmp_path / "config.yaml"
     raiz = Path(__file__).resolve().parent.parent
     texto = (raiz / "config.yaml").read_text(encoding="utf-8")
-    texto = texto.replace("ruta: data/bd.csv", f"ruta: {cfg_tmp.bd.ruta}")
+    texto = re.sub(r"(?m)^  ruta: \S+", lambda _: f"  ruta: {cfg_tmp.bd.ruta}", texto)
+    assert str(cfg_tmp.bd.ruta) in texto  # nunca la BD real
     re_clave = f"ruta_clave: {cfg_tmp.bd.ruta_clave}"
     texto = re.sub(r"ruta_clave: \S+", lambda _: re_clave, texto)
     texto = texto.replace("modelo: models/", f"modelo: {raiz / 'models'}/")

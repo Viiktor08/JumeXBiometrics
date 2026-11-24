@@ -131,8 +131,13 @@ def analizar(sistema: SistemaBiometrico, foto, region=None) -> Analisis:
             else:
                 analisis.seleccion = "manual_sin_puntos"
                 x, y, w, h = analisis.region
-                analisis.procesada = sistema.detector.preparar_sin_detector(
-                    analisis.imagen[y:y + h, x:x + w])
+                recorte = analisis.imagen[y:y + h, x:x + w]
+                # Como en los métodos _sd (paso 5): aunque no se alinee, el recuadro
+                # tiene que contener una cara. Si no, por aquí entraría cualquier
+                # patrón (ruido, parches adversarios) al extractor.
+                if sistema.cfg.defensa.cara_en_sd:
+                    sistema.detector.comprobar_cara_recortada(recorte)
+                analisis.procesada = sistema.detector.preparar_sin_detector(recorte)
         marcar("alineado")
         analisis.template = sistema.extractor.extraer(analisis.procesada.cara)
         marcar("extraccion")

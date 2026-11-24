@@ -1,5 +1,9 @@
 # Configuración de la demo web JumeX Lens (python -m biometria.web).
 #
+# Desde que config.yaml es la configuración única, este fichero tiene los mismos
+# valores (misma BD, misma clave). Se mantiene para no romper los comandos
+# documentados con --config config_lens.yaml.
+#
 # Igual que config.yaml (extractor ArcFace y mismos umbrales) salvo:
 #   - BD propia en data/lens/ (las personas de la demo no se mezclan con data/bd.csv);
 #   - varias_caras: mayor y nitidez mínima 40, más permisivos para fotos de internet
@@ -51,9 +55,8 @@ limites:
 defensa:
   # Contramedidas frente a ataques (ver THREAT_MODEL.md). Se pueden poner a 0 para
   # medir el sistema sin ellas o para no romper la interoperabilidad del enunciado.
-  coherencia_muestra: 0.20   # al AÑADIR una muestra a alguien que ya existe, debe
-                             # parecerse a las suyas (LFW: rechaza 1,1 % de muestras
-                             # legítimas, bloquea 99,9 % de caras ajenas). 0 = desactivado.
+  coherencia_muestra: 0.35   # ver config.yaml (contra la PRIMERA muestra)
+  ancla_muestra: 0.20        # ver config.yaml
   # Contra el ajuste automático de un template por los métodos _t (hill-climbing):
   decimales_puntuacion_t: 2  # la puntuación que sale por _t se redondea a 2 decimales
   max_intentos_t: 50         # máx. comparaciones _t por id en la ventana (0 = sin límite)

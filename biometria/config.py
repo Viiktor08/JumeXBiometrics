@@ -84,9 +84,15 @@ class ConfigDefensa:
     desactivar para medir el sistema sin ellas o para no romper el enunciado."""
 
     # Paso 1: al añadir una muestra a una persona que ya existe, su similitud con
-    # las anteriores debe llegar a este umbral (0 = desactivado). Corta el
-    # envenenamiento de la inscripción (añadir otra cara con el nombre de la víctima).
+    # la PRIMERA muestra (la inscripción original) debe llegar a este umbral
+    # (0 = desactivado). Corta el envenenamiento de la inscripción (añadir otra cara
+    # con el nombre de la víctima) y la deriva paso a paso con morphs.
     coherencia_muestra: float = 0.0
+    # Paso 1 (ancla): al verificar o identificar, las muestras extra de una persona
+    # solo cuentan si la foto se parece al menos esto a su PRIMERA muestra; si no,
+    # la puntuación es la de la primera. Así una muestra envenenada (un morph que se
+    # parece a víctima y atacante) no sirve para colar al atacante. 0 = desactivado.
+    ancla_muestra: float = 0.0
     # Paso 3 (hill-climbing): nº de decimales a los que se redondea la puntuación que
     # devuelven los métodos _t (quien no ve la foto). Menos decimales = menos pistas
     # para ir ajustando un template hasta colarlo. 0 = sin redondeo.
@@ -181,6 +187,7 @@ def _construir(datos: dict, base: Path) -> Config:
             ),
             defensa=ConfigDefensa(
                 coherencia_muestra=float(defe.get("coherencia_muestra", 0.0)),
+                ancla_muestra=float(defe.get("ancla_muestra", 0.0)),
                 decimales_puntuacion_t=int(defe.get("decimales_puntuacion_t", 0)),
                 max_intentos_t=int(defe.get("max_intentos_t", 0)),
                 ventana_intentos_s=float(defe.get("ventana_intentos_s", 60.0)),
@@ -220,6 +227,8 @@ def _validar(cfg: Config) -> None:
         errores.append("limites.max_muestras_por_id debe ser >= 1")
     if not 0.0 <= cfg.defensa.coherencia_muestra <= 1.0:
         errores.append("defensa.coherencia_muestra debe estar en [0, 1]")
+    if not 0.0 <= cfg.defensa.ancla_muestra <= 1.0:
+        errores.append("defensa.ancla_muestra debe estar en [0, 1]")
     if not 0 <= cfg.defensa.decimales_puntuacion_t <= 10:
         errores.append("defensa.decimales_puntuacion_t debe estar entre 0 y 10")
     if cfg.defensa.max_intentos_t < 0:

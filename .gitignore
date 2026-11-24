@@ -44,7 +44,7 @@ tests/.cache/
 .vscode/
 
 # --- Datos de personas reales ---
-# Dataset/ (49 fotos de personas públicas) SÍ va al repositorio: docker compose lo
+# Dataset/ (50 fotos de personas públicas: 49 del docente + Messi) SÍ va al repositorio: docker compose lo
 # inscribe al arrancar por primera vez. Las BD, plantillas y copias, nunca.
 Dataset */
 Dataset*.tar.gz

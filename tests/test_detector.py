@@ -80,8 +80,9 @@ def test_varias_caras_error_o_mayor(cfg, detector, astronauta):
     pequena = cv2.resize(astronauta, (384, 384))
     pequena = cv2.copyMakeBorder(pequena, 64, 64, 0, 0, cv2.BORDER_CONSTANT)
     dos = np.hstack([astronauta, pequena])
+    det_error = Detector(cfg_con(cfg, detector={"varias_caras": "error"}))
     with pytest.raises(VariasCaras):
-        detector.procesar(dos)
+        det_error.procesar(dos)
 
     det_mayor = Detector(cfg_con(cfg, detector={"varias_caras": "mayor"}))
     procesada = det_mayor.procesar(dos)

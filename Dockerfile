@@ -7,7 +7,7 @@
 # La web (JumeX Lens) con URL pública se levanta con docker-compose.yml:
 #   docker compose up --build
 #
-# La base de datos (data/bd.csv) vive en el volumen /app/data y la clave maestra
+# La base de datos (data/lens/bd.csv) vive en el volumen /app/data y la clave maestra
 # en OTRO volumen (~/.jumex), igual que fuera de Docker: quien lea o escriba los
 # datos no tiene la clave. Ninguna de las dos va dentro de la imagen.
 
