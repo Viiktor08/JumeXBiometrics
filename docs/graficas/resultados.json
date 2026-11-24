@@ -1,0 +1,207 @@
+{
+ "config": {
+  "verificacion": 0.35,
+  "identificacion": 0.4,
+  "margen": 0.1
+ },
+ "lfw": {
+  "semilla": 11,
+  "descartadas": 16,
+  "calibracion": {
+   "personas": 148,
+   "genuinos": 405,
+   "impostores": 80598,
+   "eer": 0.014814539098020078,
+   "umbral_eer": 0.14087212085723877,
+   "umbral_far_0.1%": 0.21231781108474732
+  },
+  "test": {
+   "personas": 148,
+   "genuinos": 465,
+   "impostores": 90486,
+   "eer": 0.004410555758759331,
+   "umbral_eer": 0.1668490618467331,
+   "con_umbral_eer_de_calibracion": {
+    "umbral": 0.1409,
+    "far": 0.012068165241031761,
+    "frr": 0.004301075268817204
+   },
+   "con_umbral_far_0.1%_de_calibracion": {
+    "umbral": 0.2123,
+    "far": 0.0008067546360762991,
+    "frr": 0.0064516129032258064
+   },
+   "con_umbral_verificacion_config": {
+    "umbral": 0.35,
+    "far": 1.1051433370908207e-05,
+    "frr": 0.0064516129032258064
+   },
+   "con_umbral_identificacion_config": {
+    "umbral": 0.4,
+    "far": 1.1051433370908207e-05,
+    "frr": 0.010752688172043012
+   },
+   "identificacion": {
+    "personas": 148,
+    "distractores": 344,
+    "consultas": 279,
+    "rank1": 0.992831541218638,
+    "rank5": 1.0,
+    "rank10": 1.0,
+    "fnir": 0.010752688172043012,
+    "desconocidos": 196,
+    "fpir": 0.0
+   }
+  }
+ },
+ "messi": {
+  "fotos_nuevas": 13,
+  "procesadas": 10,
+  "descartadas": [
+   {
+    "foto": "2011_messi.jpg",
+    "error": "cara_pequena"
+   },
+   {
+    "foto": "lionel_messi_florent_torchut.jpg",
+    "error": "cara_pequena"
+   },
+   {
+    "foto": "messi_in_copa_america_2007_cropped.jpg",
+    "error": "sin_cara"
+   }
+  ],
+  "verificadas": 10,
+  "identificadas": 10,
+  "rank1": 10,
+  "confundido_con_otro": 0,
+  "puntuacion_media": 0.63521,
+  "puntuacion_min": 0.5664,
+  "max_contra_otros_inscritos": [
+   {
+    "id": "Hwang Min-Hyun",
+    "puntuacion": 0.1328
+   },
+   {
+    "id": "Lady Gaga",
+    "puntuacion": 0.1228
+   },
+   {
+    "id": "Christian Bale",
+    "puntuacion": 0.0973
+   }
+  ],
+  "consultas": [
+   {
+    "foto": "2015_uefa_super_cup_64_crop.jpg",
+    "puntuacion": 0.6378,
+    "rango": 1,
+    "verificado": true,
+    "identificado": true,
+    "mejor_otro": {
+     "id": "Stevie Wonder",
+     "puntuacion": 0.1254
+    }
+   },
+   {
+    "foto": "argentina_team_in_st_petersburg_cropped_messi.jpg",
+    "puntuacion": 0.5936,
+    "rango": 1,
+    "verificado": true,
+    "identificado": true,
+    "mejor_otro": {
+     "id": "Hwang Min-Hyun",
+     "puntuacion": 0.1441
+    }
+   },
+   {
+    "foto": "cristina_fern_ndez_y_la_selecci_n_argentina_de_f_tbol_2014_3.jpg",
+    "puntuacion": 0.6859,
+    "rango": 1,
+    "verificado": true,
+    "identificado": true,
+    "mejor_otro": {
+     "id": "Santiago Segura",
+     "puntuacion": 0.1018
+    }
+   },
+   {
+    "foto": "fra_arg_22.jpg",
+    "puntuacion": 0.5936,
+    "rango": 1,
+    "verificado": true,
+    "identificado": true,
+    "mejor_otro": {
+     "id": "Christian Bale",
+     "puntuacion": 0.132
+    }
+   },
+   {
+    "foto": "lionel_messi_2017.jpg",
+    "puntuacion": 0.6132,
+    "rango": 1,
+    "verificado": true,
+    "identificado": true,
+    "mejor_otro": {
+     "id": "Kim Jisoo",
+     "puntuacion": 0.1233
+    }
+   },
+   {
+    "foto": "lionel_messi_31mar2007.jpg",
+    "puntuacion": 0.5664,
+    "rango": 1,
+    "verificado": true,
+    "identificado": true,
+    "mejor_otro": {
+     "id": "Christian Bale",
+     "puntuacion": 0.0985
+    }
+   },
+   {
+    "foto": "lionel_messi_after_game.jpg",
+    "puntuacion": 0.6262,
+    "rango": 1,
+    "verificado": true,
+    "identificado": true,
+    "mejor_otro": {
+     "id": "Samuel L Jackson",
+     "puntuacion": 0.1304
+    }
+   },
+   {
+    "foto": "lionel_messi_player_of_the_year_3_2011.jpg",
+    "puntuacion": 0.6294,
+    "rango": 1,
+    "verificado": true,
+    "identificado": true,
+    "mejor_otro": {
+     "id": "Winnie Harlow",
+     "puntuacion": 0.1203
+    }
+   },
+   {
+    "foto": "lionel_messi_wc2022.jpg",
+    "puntuacion": 0.7531,
+    "rango": 1,
+    "verificado": true,
+    "identificado": true,
+    "mejor_otro": {
+     "id": "Zoe Saldana",
+     "puntuacion": 0.1022
+    }
+   },
+   {
+    "foto": "messi_vs_nigeria_2018.jpg",
+    "puntuacion": 0.6529,
+    "rango": 1,
+    "verificado": true,
+    "identificado": true,
+    "mejor_otro": {
+     "id": "Santiago Segura",
+     "puntuacion": 0.1276
+    }
+   }
+  ]
+ }
+}

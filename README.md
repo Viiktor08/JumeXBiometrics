@@ -17,8 +17,9 @@ Python o desde una web, **JumeX Lens**.
 > CLI y la web) está terminado y probado (todos los tests pasan, también dentro del
 > Docker), y el modelo de amenazas está en [`THREAT_MODEL.md`](THREAT_MODEL.md). La
 > técnica asignada, **ArcFace**, es el extractor principal, con los umbrales
-> calibrados sobre LFW (`scripts/evaluar.py`). **Faltan** las curvas DET/ROC/CMC y
-> la evaluación del grupo rival. Los detalles,
+> calibrados sobre LFW (`scripts/evaluar.py`). La evaluación propia, con curvas
+> DET/ROC/CMC, calibración y test separados y fotos nuevas de Lionel Messi, está en
+> [`docs/EVALUACION.md`](docs/EVALUACION.md). **Falta** la evaluación del grupo rival. Los detalles,
 > sin maquillar, están en [Estado del proyecto](#estado-del-proyecto-y-trabajo-pendiente).
 
 ## Levantar la web en un comando
@@ -68,6 +69,8 @@ el **PIN de administrador** (para inscribir, borrar y ver la base de datos).
 | **Base de datos** | Se crea sola la primera vez en `data/lens/` con las fotos de `Dataset/` y se reutiliza en los siguientes arranques. Para empezar de cero: `docker compose down`, borrar `data/lens/` y `~/.jumex/clave_lens.key` y `~/.jumex/sello-*.json`, y volver a lanzar. |
 | **Puerto ocupado** | Si el 8000 está en uso: `PUERTO=8080 docker compose up --build` (en PowerShell: `$env:PUERTO=8080; docker compose up --build`). |
 | **Linux** | Si da `Permission denied` en `data/`: `sudo chown -R 1000:1000 data` (el contenedor no corre como root). |
+| **`additional privileges requested`** | Pasa en macOS si el repositorio está dentro de una carpeta sincronizada (OneDrive, iCloud…): Docker Compose pide permiso para leer esa ruta al construir. Se arregla con `BUILDX_BAKE_ENTITLEMENTS_FS=0 docker compose up --build` (en PowerShell: `$env:BUILDX_BAKE_ENTITLEMENTS_FS=0; docker compose up --build`), o clonando el repositorio en una carpeta normal. |
+| **BD creada antes del 24/11/2026** | Tiene 49 personas (sin Lionel Messi): la BD solo se crea si no existe. Para añadirlo sin empezar de cero: `docker compose exec web python -m biometria inscribir --id "Lionel Messi" --foto Dataset/lionel_messi_2022.jpg`. |
 
 ## Índice
 
@@ -131,7 +134,7 @@ Son los **9 métodos que pide el enunciado**. Además:
 - **Base de datos en CSV** con firma HMAC por fila, cifrado opcional de los templates y escritura atómica.
 - **JumeX Lens**: web para verificar, identificar (incluso a varias personas en una foto), inscribir y editar la base de datos, con la animación de cada paso del pipeline. Las fotos se pueden subir o **hacer en el momento con la cámara**.
 - **Demo de cámara** en directo y varios scripts para revisar el detector y comparar caras.
-- **Dockerfile** y **245 tests**.
+- **Dockerfile** y **270 tests**.
 
 ---
 
@@ -146,7 +149,7 @@ python3 -m venv .venv && source .venv/bin/activate   # en Windows: .venv\Scripts
 pip install -r requirements-dev.txt
 python scripts/descargar_modelos.py                   # baja los modelos y verifica su SHA256
 python -m biometria                                   # comprueba que todo está en su sitio
-pytest -q                                             # 245 tests
+pytest -q                                             # 270 tests
 ```
 
 > Si el repo está en OneDrive o Dropbox, crea el entorno virtual **fuera** de la
@@ -183,7 +186,7 @@ cd JumeXBiometrics
 python3 -m venv ~/.venvs/jumex && source ~/.venvs/jumex/bin/activate
 pip install -r requirements-dev.txt
 python scripts/descargar_modelos.py          # ~290 MB la primera vez (ArcFace); verifica SHA256
-pytest -q                                    # 245 tests
+pytest -q                                    # 270 tests
 ```
 
 - El repositorio es **privado**: hay que tener acceso (Settings → Collaborators).
@@ -734,6 +737,7 @@ Los módulos sueltos también se pueden usar: `Detector` (`detectar`, `procesar`
 | `python -m biometria.camara [--umbral U]` | Detección en directo con la webcam: caras, confianza, puntos, resultado de la calidad y la cara alineada; con `s` guarda la foto, con `q` sale |
 | `python -m biometria.web [--tunel]` | Arranca JumeX Lens (ver siguiente apartado) |
 | `python scripts/arrancar_web.py [opciones de la web]` | Lo que ejecuta `docker compose up`: si no existe la BD de la web, la crea con las fotos de `Dataset/` (clave aleatoria nueva) y arranca la web |
+| `python scripts/graficas.py [--personas N] [--desconocidos D] [--salida S]` | Evaluación para la memoria: reparte LFW en personas de calibración y de test, fija umbrales en una y mide en la otra; curvas DET, ROC, CMC (con distractores) y FPIR/FNIR, y las fotos nuevas de Messi de `fotos_prueba/messi/` contra la galería real. Deja PNG y `resultados.json` en `docs/graficas/` |
 | `docker compose exec -T web python scripts/pruebas_revision.py` | Batería de ataques y medidas contra el sistema real (BD y clave temporales): foto exacta, robustez, `_sd`, firma de `_t`, hill-climbing, ataques a la BD, deriva con morphs, ids, entradas, CLI y duplicados. Resultados y análisis en [`docs/EVALUACION.md`](docs/EVALUACION.md) |
 
 ---
@@ -1002,8 +1006,10 @@ enseña cuáles están activas, y `scripts/medir_defensas.py` mide su coste en L
 │       ├── analisis.py           pipeline paso a paso, varias caras, galería de fotos
 │       └── static/               interfaz: index.html, estilos.css, app.js, logo.svg
 ├── scripts/                      herramientas (ver "Scripts y herramientas")
-├── tests/                        245 tests con pytest
-├── docs/                         capturas para este README
+├── tests/                        270 tests con pytest
+├── docs/                         capturas, EVALUACION.md y graficas/ (curvas y resultados.json)
+├── Dataset/                      las 49 fotos del docente + la de Messi (lo que se inscribe)
+├── fotos_prueba/messi/           fotos nuevas de Messi solo para evaluar (nunca se inscriben), con CREDITOS.md
 ├── data/                         (fuera de git) fotos, bases de datos, claves
 ├── models/                       (fuera de git) modelos descargados
 ├── config.yaml                   configuración por defecto (ArcFace)
@@ -1016,7 +1022,7 @@ enseña cuáles están activas, y `scripts/medir_defensas.py` mide su coste en L
 
 ## Tests
 
-`pytest -q` ejecuta **245 tests** en unos 20-25 segundos (también dentro del Docker). Cubren:
+`pytest -q` ejecuta **270 tests** en unos 30-40 segundos (también dentro del Docker). Cubren:
 
 | Fichero | Qué comprueba |
 |---|---|
@@ -1052,17 +1058,17 @@ equipo), pero el docente aclaró que son **50**: las **49** fotos que entregó
 | 5 | `sistema-cli` | `SistemaBiometrico` con los 9 métodos y la CLI | ✅ |
 | extra | `web`, `web-v2` | SFace, JumeX Lens, varias caras, ficha editable, Cloudflare Tunnel | ✅ |
 | — | `arcface` | **ArcFace como extractor principal**, umbrales calibrados (`evaluar.py`), migración de la BD, cámara en la web, "los más parecidos" filtrados | ✅ |
-| 6 | `inscripcion-evaluacion` | Inscripción de las 50 personas ✅; FAR/FRR/EER ✅, curvas DET/ROC y CMC | ⏳ |
+| 6 | `inscripcion-evaluacion` | Inscripción de las 50 personas, FAR/FRR/EER, calibración y test separados, curvas DET/ROC/CMC/FPIR-FNIR y fotos nuevas de Messi (`graficas.py`, [`docs/EVALUACION.md`](docs/EVALUACION.md)) | ✅ |
 | 7 | `seguridad` | `THREAT_MODEL.md` y contramedidas (pasos 1–8 y riesgos aceptados) | ✅ |
 
 **Pendiente:**
-- **El resto de la evaluación** (fase 6): `scripts/evaluar.py` ya da FAR/FRR/EER y rank-1; faltan las **curvas** DET/ROC y CMC, separar sujetos de calibración y de test, y medir los `_sd` y la galería real (hoy hay una sola foto por persona).
 - **La evaluación del grupo rival** (fase 3 del enunciado).
 
 **Limitaciones conocidas** (el detalle, con lo medido, en [`THREAT_MODEL.md`](THREAT_MODEL.md), riesgos aceptados):
 - **Sin detección de vivacidad:** una foto de una foto, o una imagen de una pantalla, se trata como una cara real.
 - **Las fotos de inscripción están en el repositorio** (`Dataset/`): quien lo tenga puede verificarse como cualquiera con su foto exacta.
 - **Si el sistema se ejecuta en el ordenador del atacante**, la clave es suya: el cifrado, la firma de templates y el sello no le frenan.
+- **Rendimiento por grupos de población sin medir:** ArcFace viene entrenado por terceros; no se ha comprobado si falla más con unos grupos que con otros (`THREAT_MODEL.md`, riesgo 13).
 - **Gemelos no inscritos** (Aitana Etxebarria, James Phelps, Mary-Kate Olsen): el gemelo puede pasar por su hermano.
 - **Gemelos al inscribir:** `cara_duplicada` puede rechazar al gemelo de alguien ya inscrito como si fuera la misma cara; para inscribirlo, el admin desactiva esa defensa un momento.
 - Algunos ids tienen erratas de letras que vienen de los nombres de fichero del Dataset (`Arianna Grande`, `Serenna Williams`, `Wiliem Dafoe`, `Zack Efron`, `Hunter Schufer`): esas letras hay que escribirlas como salen en `python -m biometria bd`. Las mayúsculas y las tildes dan igual.

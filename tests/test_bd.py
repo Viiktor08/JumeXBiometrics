@@ -280,7 +280,8 @@ def test_se_leen_filas_planas_y_cifradas_mezcladas(cfg_tmp, bd, bd_cifrada, extr
 
 # --- Identificadores ----------------------------------------------------------------------
 
-@pytest.mark.parametrize("id_persona", ["Ana", "José Pérez", "Ñandú_2", "O'Brien", "Ana-María", "persona 51"])
+@pytest.mark.parametrize("id_persona", ["Ana", "José Pérez", "Ñandú_2", "O'Brien", "Ana-María", "persona 51",
+                                       "Hwang Min-Hyun", "황민현", "Владимир", "山田たろう", "Ἀθηνᾶ"])
 def test_ids_validos(id_persona):
     assert validar_id(id_persona) == id_persona
 
@@ -294,6 +295,7 @@ def test_id_se_normaliza():
     "", "   ", "a" * 101,
     "=HYPERLINK(\"http://x\")", "+1", "-1", "@SUM(A1)",  # inyección de fórmulas en Excel
     "Ana\nLuis", "Ana\x00", "Ana,Luis", "Ana;Luis", "../etc/passwd", "_Ana",
+    "\u0410dele", "Keanu R\u0435eves", "Ad\u03b5le",  # homoglifos: А/е cirílicas, ε griega
     123, None,
 ])
 def test_ids_invalidos(id_persona):

@@ -458,4 +458,16 @@ Los decimos nosotros antes de que los encuentre el equipo rival.
     culpa del reconocimiento. Detalle de seguridad: el límite de intentos de `_t` se
     cuenta por persona, así que cambiar las mayúsculas no da un cupo nuevo; y en la
     web, un nombre inexistente da la misma puntuación "fantasma" se escriba como se
-    escriba.
+    escriba. Los **homoglifos** sí se paran: un id que mezcla alfabetos (`Аdele` con la
+    `А` cirílica, `Ad`+`ε` griega+`le`) da `id_invalido`, así que no se puede crear una
+    persona que se lea igual que otra (`bd.validar_id`, `tests/test_bd.py`).
+13. **Rendimiento desigual entre grupos de población.** ArcFace (`w600k_r50`) está
+    entrenado con WebFace600K, con más fotos de unos grupos que de otros. Los estudios
+    de NIST (FRVT, parte 3) muestran que los modelos de este tipo tienen tasas de falsa
+    coincidencia distintas según el origen y el sexo de las personas, más altas en
+    algunos grupos (a menudo personas de Asia oriental y de piel oscura). En nuestras
+    medidas no aparece (las 50 personas del Dataset, muy diversas, quedan todas por
+    debajo de 0,30 entre sí, y en LFW el FAR es casi nulo), pero con 50 personas y LFW
+    no se puede descartar: LFW no tiene etiquetas de población y el Dataset solo tiene
+    una foto por persona. No hemos reentrenado ni ajustado el modelo, ni con muestras
+    adversarias (ver el riesgo 4).

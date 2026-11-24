@@ -18,6 +18,7 @@ Prácticas.pdf
 
 # Fotos de personas reales y otros datasets: no van en la imagen (data/ se monta)
 Dataset
+fotos_prueba
 Dataset */
 *.tar.gz
 caras_lfw

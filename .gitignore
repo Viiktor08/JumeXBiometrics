@@ -27,6 +27,9 @@ data/*
 !docs/**
 !Dataset/
 !Dataset/**
+# Fotos de PRUEBA (nunca se inscriben): fotos nuevas de la persona del equipo para la evaluación
+!fotos_prueba/
+!fotos_prueba/**
 
 # --- Modelos pesados: se descargan con scripts/descargar_modelos.py ---
 models/*

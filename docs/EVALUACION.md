@@ -62,6 +62,37 @@ FRR 0,85 % en verificación, y FRR 1,02 % en identificación.
 | EER | **0,82 %** | 1,60 % | ≈ 37 % |
 | Rank-1 | **99,2 %** | 98,4 % | 11 % |
 
+### 2.1 Calibración y test con personas distintas, y curvas
+
+Las cifras de arriba miden con los mismos datos con los que se eligieron los umbrales.
+`scripts/graficas.py` lo hace bien: reparte al azar (semilla 11) las personas de LFW en
+dos mitades **sin nadie en común**, calcula los umbrales en la de **calibración** y mide
+en la de **test**. Figuras y cifras en [`docs/graficas/`](graficas/) (`resultados.json`).
+
+| | Personas | Genuinos | Impostores | EER |
+|---|---|---|---|---|
+| Calibración | 148 | 405 | 80 598 | 1,48 % (umbral 0,141) |
+| **Test** | **148** | **465** | **90 486** | **0,44 %** |
+
+Umbrales aplicados sobre las personas de **test**:
+
+| Umbral | De dónde sale | FAR | FRR |
+|---|---|---|---|
+| 0,141 | EER de calibración | 1,21 % | 0,43 % |
+| 0,212 | FAR 0,1 % en calibración | 0,081 % | 0,65 % |
+| **0,35** | **verificación (config)** | **0,0011 %** (1 de 90 486) | **0,65 %** (3 de 465) |
+| **0,40** | **identificación (config)** | **0,0011 %** | **1,08 %** (5 de 465) |
+
+- **Lectura:** el umbral que se habría elegido para un FAR del 0,1 % en calibración da en test un 0,08 %: los umbrales generalizan a personas que no se usaron para fijarlos. Los de la configuración (0,35 y 0,40) son mucho más conservadores: priorizan no aceptar impostores a costa de algún falso rechazo.
+- **Identificación** (148 inscritos más **344 distractores** en la galería: los desconocidos y una foto de cada persona de calibración): **rank-1 99,28 %**, rank-5 100 %. Identificación abierta con 196 desconocidos: **FPIR 0 %** y **FNIR 1,08 %**.
+- **Los rechazos genuinos más bajos** (3 pares entre 0,04 y 0,17) apuntan a fotos de LFW donde la cara más grande no es la de la persona etiquetada (sale otra al lado): sería un fallo del dato más que del modelo, pero se dejan contados.
+
+| | |
+|---|---|
+| ![Distribuciones](graficas/01_distribuciones.png) | ![DET](graficas/02_det.png) |
+| ![ROC](graficas/03_roc.png) | ![CMC](graficas/04_cmc.png) |
+| ![FPIR/FNIR](graficas/05_fpir_fnir.png) | ![Messi](graficas/06_messi_fotos_nuevas.png) |
+
 ## 3. La galería real (Dataset de la práctica)
 
 **Detección y calidad.** Las 50 fotos se detectan e inscriben (unos 50 ms por foto):
@@ -78,6 +109,15 @@ FRR 0,85 % en verificación, y FRR 1,02 % en identificación.
 - **Parejas más parecidas:** Salma Hayek–Tini (0,25), Keanu Reeves–Temuera Morrison (0,20) y Arianna Grande–Taylor Swift (0,19).
 - **Messi:** antes de inscribirlo, identificar con su foto daba desconocido (mejor candidato, 0,13).
 - **Lectura:** ningún par de inscritos se acerca al umbral, así que la galería no tiene "dobles" peligrosos.
+
+**Lionel Messi con fotos nuevas.** Nuestra persona está inscrita con una sola foto
+(`Dataset/lionel_messi_2022.jpg`). Para medir si la reconoce fuera de esa foto se
+probaron **13 fotos nuevas** de Wikimedia Commons, de 2007 a 2022, que **nunca se
+inscriben** (`fotos_prueba/messi/`, autores y licencias en `CREDITOS.md`):
+- **10 de 10 válidas verificadas e identificadas** como Messi (rank-1), con similitud entre **0,57** (2007, con 19 años) y **0,75**; media 0,64.
+- El mejor de los otros 49 inscritos nunca pasa de **0,14**: margen enorme con el umbral (0,35).
+- **3 descartadas por calidad** antes de comparar (2 `cara_pequena`, 1 `sin_cara`): el sistema no decide con fotos malas.
+- Se quitaron 2 fotos más en las que la cara más grande no era la de Messi.
 
 **Gemelos.** El Dataset incluye a Aitana Etxebarria, James Phelps y Mary-Kate Olsen, cuyos gemelos no están inscritos. Una foto del gemelo probablemente se verificaría como su hermano: riesgo aceptado en `THREAT_MODEL.md`.
 
@@ -152,6 +192,7 @@ Cada ataque se lanzó contra el sistema real, con una BD temporal
 | **La misma cara con otro nombre** | La identificación de la víctima salía `ambiguo` → desconocido | `cara_ya_inscrita` al crear la persona nueva |
 | **La foto exacta del Dataset** (está en el repositorio) | Verificar da **1,00** para las 50 | Igual: **riesgo aceptado** |
 | Nombres maliciosos (fórmula, salto de línea, ruta, emoji, más de 100 caracteres) | Rechazados (`id_invalido`) | Igual |
+| **Homoglifos:** `Аdele` con la A cirílica, para crear una persona que se ve igual que otra | Se aceptaba como id distinto | `id_invalido` si el nombre mezcla alfabetos. Los nombres en un solo alfabeto (`황민현`, `Владимир`) siguen valiendo |
 | El nombre de un inscrito en minúsculas o sin tildes (`lionel messi`) | Rechazado (`id_no_inscrito`): un falso rechazo que no era del reconocimiento | Encuentra a la persona y devuelve su id real. Las erratas de letra siguen sin encontrarse |
 | Imágenes malas (basura, vacía, más de 25 MP, cara de 40 px, muy borrosa, negra) | Rechazadas con su error | Igual |
 | Web sin PIN: admin, inscribir, CSRF, path traversal, 11 MB, 61 fotos por minuto | 403, 403, 403, 404, 413, 429 | Igual |
@@ -170,10 +211,11 @@ Detalle en `THREAT_MODEL.md`:
 
 ## 5. Limitaciones de esta evaluación
 
-- **Umbrales y medida con los mismos datos de LFW:** las cifras son algo optimistas. Falta separar personas de calibración y de test.
-- **Pocos errores en la muestra:** un FAR del 0,000 % con 88 801 impostores solo dice que es menor que ~0,003 %. El FRR del 0,22 % es 1 de 452 pares.
-- **Una sola foto por persona en el Dataset:** no se puede medir el FRR con la galería real. Hacen falta 2 o 3 fotos más por persona.
-- **Faltan las curvas DET, ROC y CMC** (los datos ya los da `evaluar.py`).
+- **Pocos errores en la muestra:** un FAR del 0,0011 % es 1 impostor de 90 486; con tan pocos errores el intervalo de confianza es ancho. El FRR del 0,65 % son 3 de 465 pares.
+- **La sección 2 (sin separar) es algo optimista**; las cifras buenas para la memoria son las de la 2.1.
+- **LFW son famosos fotografiados por la prensa**, como el Dataset: las cifras no valen para cámaras de vigilancia, fotos nocturnas o muy de perfil.
+- **Una sola foto por persona en el Dataset:** el FRR con la galería real solo se ha medido para Messi (10 fotos). Para el resto se usa LFW.
+- **Grupos de población:** no se ha medido el rendimiento por grupo (ver `THREAT_MODEL.md`, riesgo 13).
 - **Falta la evaluación del sistema rival** (fase 3).
 
 ## 6. Cómo repetirlo
@@ -181,12 +223,14 @@ Detalle en `THREAT_MODEL.md`:
 ```bash
 docker compose --profile pruebas run --rm pruebas
 docker compose --profile pruebas run --rm --entrypoint python pruebas scripts/evaluar.py --personas 150 --fotos 4 --desconocidos 200 --semilla 11 --tabla
+docker compose --profile pruebas run --rm --entrypoint python pruebas scripts/graficas.py
 docker compose --profile pruebas run --rm --entrypoint python pruebas scripts/medir_defensas.py
 docker compose up -d
 docker compose exec -T web python scripts/pruebas_revision.py > resultados_revision.json
 ```
 
 El primero lanza los tests; el segundo, la evaluación con LFW (descarga unos 180 MB la
-primera vez); el tercero, el coste de las defensas en LFW; los dos últimos, la batería de
-ataques. `scripts/pruebas_revision.py` trabaja con una BD, una clave y un sello temporales en
+primera vez); el tercero, la calibración y test separados, las curvas y las fotos nuevas
+de Messi (unos 4 minutos, deja todo en `docs/graficas/`); el cuarto, el coste de las
+defensas en LFW; los dos últimos, la batería de ataques. `scripts/pruebas_revision.py` trabaja con una BD, una clave y un sello temporales en
 `/tmp`: no toca `data/lens` ni `~/.jumex`.

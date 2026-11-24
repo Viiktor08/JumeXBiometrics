@@ -111,7 +111,29 @@ def validar_id(id_persona) -> str:
             "El id debe empezar por letra o número y solo puede contener letras, "
             "números, espacios y los signos . - _ '"
         )
+    if len(alfabetos := _alfabetos(normalizado)) > 1:
+        # Homoglifos: "Аdele" con la А cirílica se ve igual que "Adele" pero sería
+        # otra persona. Un nombre real se escribe en un solo alfabeto.
+        raise IdInvalido(f"El id mezcla alfabetos ({', '.join(sorted(alfabetos))}): escríbelo en uno solo")
     return normalizado
+
+
+def _alfabetos(texto: str) -> set[str]:
+    """Alfabetos de las letras de un texto (LATIN, CYRILLIC, GREEK, HANGUL...),
+    sacados del nombre Unicode de cada letra. Números y signos no cuentan."""
+    alfabetos = set()
+    for c in texto:
+        if c.isalpha():
+            nombre = unicodedata.name(c, "")
+            alfabeto = nombre.split(" ")[0] if nombre else "DESCONOCIDO"
+            if alfabeto == "MODIFIER":
+                continue  # letras modificadoras (ʼ, ˈ...): acompañan a cualquier alfabeto
+            # En japonés y coreano se mezclan de forma natural kanji/hanja con kana o hangul
+            alfabetos.add(_ASIATICOS.get(alfabeto, alfabeto))
+    return alfabetos
+
+
+_ASIATICOS = {"CJK": "CJK", "HIRAGANA": "CJK", "KATAKANA": "CJK", "HANGUL": "CJK"}
 
 
 def clave_busqueda(id_persona) -> str:

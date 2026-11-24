@@ -52,9 +52,18 @@ services:
   # Tests y scripts de evaluación (pytest y matplotlib). No arranca con `docker compose up`.
   #   docker compose --profile pruebas run --rm pruebas
   #   docker compose --profile pruebas run --rm --entrypoint python pruebas scripts/evaluar.py --tabla
+  #   docker compose --profile pruebas run --rm --entrypoint python pruebas scripts/graficas.py
+  #     (curvas DET/ROC/CMC y fotos nuevas de Messi -> docs/graficas/; ver docs/EVALUACION.md)
   pruebas:
     build:
       context: .
       target: pruebas
     image: jumex-biometrics-pruebas
     profiles: ["pruebas"]
+    volumes:
+      # Solo lectura salvo docs/graficas, donde graficas.py deja las figuras.
+      # LFW se descarga una vez (unos 180 MB) a ~/.cache/jumex y se reutiliza.
+      - ./Dataset:/app/Dataset:ro
+      - ./fotos_prueba:/app/fotos_prueba:ro
+      - ./docs/graficas:/app/docs/graficas
+      - ${HOME:-${USERPROFILE}}/.cache/jumex:/home/biometria/.cache/jumex

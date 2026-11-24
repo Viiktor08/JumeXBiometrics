@@ -200,7 +200,7 @@ famosos, con `scripts/evaluar.py`. Comparando 1173 parejas de la misma persona y
     *administrador* con PIN (todo).
 - **Evaluación medida**: `scripts/evaluar.py` (aciertos y errores en LFW) y
   `scripts/medir_defensas.py` (cuánto cuesta y cuánto protege cada defensa).
-- **245 tests automáticos** que lanzan los ataques de verdad y comprueban que se
+- **270 tests automáticos** que lanzan los ataques de verdad y comprueban que se
   paran sin estropear el uso normal.
 - **Dockerfile** para ejecutarlo sin instalar nada.
 
@@ -402,7 +402,7 @@ biometria/
 config.yaml           configuración única: CLI, Docker y web (BD en data/lens/bd.csv)
 config_lens.yaml      igual que config.yaml (se mantiene por compatibilidad)
 scripts/              preparar_dataset, inscribir_csv, evaluar, medir_defensas, proteger_bd…
-tests/                245 tests (test_defensas.py y test_web.py prueban los ataques)
+tests/                270 tests (test_defensas.py y test_web.py prueban los ataques)
 THREAT_MODEL.md       cada ataque y defensa en detalle, con sus tests
 ~/.jumex/             (fuera del repo) claves maestras y sellos. NO compartir
 ```
