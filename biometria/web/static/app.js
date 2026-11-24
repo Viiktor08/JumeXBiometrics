@@ -119,6 +119,7 @@ const ERRORES = {
   id_invalido: ["comparacion", "Nombre no válido", null],
   id_no_inscrito: ["comparacion", "Esa persona no está en la base de datos", "Revisa el nombre (usa las sugerencias) o inscríbela antes en la pestaña Inscribir."],
   limite_muestras: ["comparacion", "Esa persona ya tiene el máximo de fotos", null],
+  cara_ya_inscrita: ["comparacion", "Esa cara ya está inscrita", "Se parece demasiado a alguien que ya está en la base de datos con otro nombre. Si es la misma persona, añade la foto a su ficha."],
   muestra_incoherente: ["comparacion", "Esta cara no se parece a esa persona", "La foto no coincide con las que ya tiene guardadas. Si de verdad es esa persona, usa una foto más parecida; si es otra, inscríbela con su propio nombre."],
   requiere_admin: ["comparacion", "Necesitas ser administrador", "Esta acción (inscribir, borrar o ver la base de datos) es solo del administrador. Entra con el PIN desde la pastilla de arriba a la derecha."],
   nombre_ocupado: ["comparacion", "Ese nombre ya existe", "Elige otro nombre. Solo el administrador puede añadir fotos a personas que ya están en la base de datos."],

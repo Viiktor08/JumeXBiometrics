@@ -60,6 +60,10 @@ class ConfigBD:
     # Sello anti-rollback: hash firmado del último CSV escrito, guardado junto a la
     # clave (no junto a la BD). Detecta que alguien vuelva a una copia antigua válida.
     anti_rollback: bool = False
+    # Con anti_rollback: si la BD existe pero su sello no, ERROR en vez de fiarse del
+    # CSV y sellarlo (borrar el sello y poner una copia antigua ya no cuela). Para
+    # aceptar a propósito la BD actual: `python -m biometria sellar`.
+    sello_estricto: bool = False
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,10 @@ class ConfigDefensa:
     # la puntuación es la de la primera. Así una muestra envenenada (un morph que se
     # parece a víctima y atacante) no sirve para colar al atacante. 0 = desactivado.
     ancla_muestra: float = 0.0
+    # Paso 1 (duplicados): al crear una persona NUEVA, si su cara se parece al menos
+    # esto a alguien ya inscrito, se rechaza (`cara_ya_inscrita`): la misma cara con
+    # otro nombre rompería la identificación de la original. 0 = desactivado.
+    cara_duplicada: float = 0.0
     # Paso 3 (hill-climbing): nº de decimales a los que se redondea la puntuación que
     # devuelven los métodos _t (quien no ve la foto). Menos decimales = menos pistas
     # para ir ajustando un template hasta colarlo. 0 = sin redondeo.
@@ -174,6 +182,7 @@ def _construir(datos: dict, base: Path) -> Config:
                 cifrar_templates=bool(bd.get("cifrar_templates", False)),
                 agregacion=str(bd.get("agregacion", "max")),
                 anti_rollback=bool(bd.get("anti_rollback", False)),
+                sello_estricto=bool(bd.get("sello_estricto", False)),
             ),
             umbrales=ConfigUmbrales(
                 verificacion=float(umb.get("verificacion", 0.5)),
@@ -188,6 +197,7 @@ def _construir(datos: dict, base: Path) -> Config:
             defensa=ConfigDefensa(
                 coherencia_muestra=float(defe.get("coherencia_muestra", 0.0)),
                 ancla_muestra=float(defe.get("ancla_muestra", 0.0)),
+                cara_duplicada=float(defe.get("cara_duplicada", 0.0)),
                 decimales_puntuacion_t=int(defe.get("decimales_puntuacion_t", 0)),
                 max_intentos_t=int(defe.get("max_intentos_t", 0)),
                 ventana_intentos_s=float(defe.get("ventana_intentos_s", 60.0)),
@@ -229,6 +239,8 @@ def _validar(cfg: Config) -> None:
         errores.append("defensa.coherencia_muestra debe estar en [0, 1]")
     if not 0.0 <= cfg.defensa.ancla_muestra <= 1.0:
         errores.append("defensa.ancla_muestra debe estar en [0, 1]")
+    if not 0.0 <= cfg.defensa.cara_duplicada <= 1.0:
+        errores.append("defensa.cara_duplicada debe estar en [0, 1]")
     if not 0 <= cfg.defensa.decimales_puntuacion_t <= 10:
         errores.append("defensa.decimales_puntuacion_t debe estar entre 0 y 10")
     if cfg.defensa.max_intentos_t < 0:

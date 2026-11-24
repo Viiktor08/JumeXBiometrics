@@ -40,6 +40,8 @@ bd:
   ruta_clave: ~/.jumex/clave_lens.key
   cifrar_templates: true    # templates cifrados con AES-GCM: leer el CSV no da los vectores
   anti_rollback: true       # sello junto a la clave: detecta volver a una BD antigua o borrarla
+  sello_estricto: true      # si falta el sello de una BD que existe: error (python -m biometria sellar
+                            # la acepta a propósito). Sin esto, borrar el sello colaba un rollback.
   agregacion: max           # cómo combinar varias muestras de una persona: max | media
 
 umbrales:
@@ -66,6 +68,9 @@ defensa:
   ancla_muestra: 0.20        # al verificar/identificar, las muestras extra solo cuentan
                              # si la foto se parece al menos esto a la PRIMERA muestra
                              # (LFW: el 0,12 % de impostores llega). 0 = desactivado.
+  cara_duplicada: 0.60       # al crear una persona NUEVA, si su cara se parece al menos esto
+                             # a alguien inscrito: cara_ya_inscrita (misma cara, otro nombre).
+                             # Entre las 50 del Dataset el máximo es 0,25. 0 = desactivado.
   # Contra el ajuste automático de un template por los métodos _t (hill-climbing):
   decimales_puntuacion_t: 2  # la puntuación que sale por _t se redondea a 2 decimales
   max_intentos_t: 50         # máx. comparaciones _t por id en la ventana (0 = sin límite)

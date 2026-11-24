@@ -471,6 +471,12 @@ def test_usuario_identifica_pero_sin_foto_ni_candidatos(servidor, ruta_astronaut
     assert r["resultado"]["aceptado"] is True and "foto" not in r["resultado"]
     assert "valores" not in r["template"]
 
+    # El nombre escrito de otra forma (minúsculas, sin tildes) encuentra a la persona
+    _, r, _ = peticion(servidor, "POST", "/api/verificar?id=eileen%20%20COLLINS", foto)
+    assert r["resultado"]["aceptado"] is True and r["resultado"]["id"] == "Eileen Collins"
+    _, ficha, _ = peticion(servidor, "GET", "/api/persona?id=eileen%20collins", cabeceras=cab)
+    assert ficha["id"] == "Eileen Collins" and len(ficha["muestras"]) == 1
+
     # El admin sí lo ve todo
     _, r, _ = peticion(servidor, "POST", "/api/identificar", foto, cab)
     assert r["resultado"]["personas"] == 1 and len(r["template"]["valores"]) == 512
@@ -492,7 +498,16 @@ def test_el_mas_no_existe_por_defecto(servidor, ruta_astronauta):
     assert estado_http == 403 and r["error"]["error"] == "requiere_admin"
 
 
+def _sin_cara_duplicada(config):
+    """Copia de la config sin `cara_duplicada`, para tests que inscriben la misma cara con dos nombres."""
+    texto = config.read_text(encoding="utf-8")
+    nuevo = re.sub(r"(?m)^  cara_duplicada: \S+", "  cara_duplicada: 0.0", texto)
+    assert nuevo != texto
+    config.write_text(nuevo, encoding="utf-8")
+
+
 def test_inscripcion_abierta_solo_permite_personas_nuevas(config_web, ruta_astronauta):
+    _sin_cara_duplicada(config_web)  # aquí "Amigo Uno" y "Persona Real" son la misma foto
     srv = _servidor_abierto(config_web, 5)
     try:
         puerto = srv.server_address[1]
@@ -513,6 +528,25 @@ def test_inscripcion_abierta_solo_permite_personas_nuevas(config_web, ruta_astro
         # Las demás acciones de admin siguen cerradas
         assert peticion(puerto, "GET", "/api/personas")[0] == 403
         assert peticion(puerto, "DELETE", "/api/personas?id=Amigo%20Uno")[0] == 403
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_inscripcion_abierta_no_admite_una_cara_ya_inscrita(config_web, ruta_astronauta):
+    """M3 de la revisión: con la inscripción abierta, la foto de alguien inscrito no se
+    puede inscribir con otro nombre (su identificación saldría "ambiguo")."""
+    srv = _servidor_abierto(config_web, 5)
+    try:
+        puerto = srv.server_address[1]
+        foto = ruta_astronauta.read_bytes()
+        cab = {"Cookie": cookie_admin(puerto)}
+        peticion(puerto, "POST", "/api/inscribir?id=Persona%20Real", foto, cab)  # la inscribe el admin
+        _, r, _ = peticion(puerto, "POST", "/api/inscribir?id=Otro%20Nombre", foto)  # un usuario
+        assert not r["ok"] and r["error"]["error"] == "cara_ya_inscrita"
+        assert "Persona" not in r["error"]["mensaje"]  # no revela a quién se parece
+        _, r, _ = peticion(puerto, "POST", "/api/identificar", foto)
+        assert r["resultado"]["id"] == "Persona Real" and not r["resultado"]["ambiguo"]
     finally:
         srv.shutdown()
         srv.server_close()

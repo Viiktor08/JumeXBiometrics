@@ -87,6 +87,16 @@ class MuestraIncoherente(ErrorBiometrico):
     codigo = "muestra_incoherente"
 
 
+class CaraYaInscrita(ErrorBiometrico):
+    """Se intenta crear una persona nueva con una cara que ya está inscrita con otro id.
+
+    Defiende la identificación de un duplicado: inscribir la foto de la víctima con
+    otro nombre haría que identificarla saliera "ambiguo" (o con el nombre falso).
+    """
+
+    codigo = "cara_ya_inscrita"
+
+
 class DemasiadosIntentos(ErrorBiometrico):
     """Se ha superado el límite de comparaciones por template (_t) en poco tiempo.
 

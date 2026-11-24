@@ -119,9 +119,11 @@ Con Docker, lo mismo dentro del contenedor (con la web levantada):
 docker compose exec web python -m biometria verificar --id "Keanu Reeves" --foto Dataset/keanu_reeves_2021.png
 ```
 
-Los ids se escriben **exactamente** como salen en `bd` (mayúsculas incluidas):
-algunos tienen erratas que vienen de los nombres de fichero del Dataset
-(`Arianna Grande`, `Serenna Williams`, `Wiliem Dafoe`…).
+Al buscar un id **no importan las mayúsculas, las tildes ni los espacios de más**:
+`"lionel messi"` es `Lionel Messi` y `"Nicolás Maduro"` es `Nicolas Maduro`. Lo que sí
+importa son las letras: algunos ids tienen erratas que vienen de los nombres de
+fichero del Dataset (`Arianna Grande`, `Serenna Williams`, `Wiliem Dafoe`…) y hay que
+escribirlas como salen en `bd`.
 
 ---
 
@@ -233,7 +235,8 @@ validación de entradas. Lo decimos nosotros antes que el rival.
 | 5 | Pasar a `_sd` (o a la cara marcada a mano en la web) algo que **no es una cara** | Aceptaba ruido o cualquier imagen | YuNet comprueba que hay una cara |
 | 6a | **Leer** el CSV | Se veían los vectores | Cifrado AES-256-GCM |
 | 6b | **Escribir** el CSV y volver a firmarlo | La clave estaba al lado del CSV | La clave está en `~/.jumex/` |
-| 6c | Volver a una **copia antigua** del CSV o borrarlo | Pasaba sin aviso | Sello anti-rollback junto a la clave |
+| 6c | Volver a una **copia antigua** del CSV o borrarlo (aunque se borre también el sello) | Pasaba sin aviso | Sello anti-rollback junto a la clave; sin sello, error (`sellar` lo acepta a propósito) |
+| 1b | Inscribir la cara de alguien **con otro nombre** para que su identificación falle | Salía "ambiguo" | Al crear una persona nueva, si se parece ≥ 0,60 a alguien: `cara_ya_inscrita` |
 | 6d | Dos procesos escribiendo a la vez | Se podía perder una inscripción | Bloqueo de fichero |
 | 8 | Adivinar el PIN, saturar la web, robar la sesión, averiguar quién está inscrito | Sin límites | Bloqueo del PIN, límites por IP, timeouts, sesión que caduca, respuesta uniforme |
 
@@ -352,11 +355,9 @@ documentados en `THREAT_MODEL.md`:
    `docker compose up` funcione solo): con la foto exacta de alguien, verificar da
    1,00. Son fotos públicas de famosos y el repo es privado, pero el rival lo tiene.
 9. **El rival ejecutando el sistema en su ordenador** tiene la clave (ver arriba).
-10. **Borrar el sello** (`~/.jumex/sello-*.json`) y poner una copia antigua de la BD:
-    sin sello, el sistema se fía del CSV que hay. Hace falta escribir en `~/.jumex/`.
-11. **La misma cara con otro nombre**: si alguien la inscribe (el admin o, con la
-    inscripción abierta, cualquiera), la identificación de esa persona sale
-    "ambiguo". Verificar sigue funcionando.
+10. **Gemelos al inscribir**: la defensa contra la misma cara con otro nombre puede
+    rechazar al gemelo de alguien inscrito. El admin la desactiva un momento para
+    inscribirlo.
 
 ---
 

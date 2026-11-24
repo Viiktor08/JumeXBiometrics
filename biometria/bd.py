@@ -114,6 +114,18 @@ def validar_id(id_persona) -> str:
     return normalizado
 
 
+def clave_busqueda(id_persona) -> str:
+    """Forma de un id para BUSCARLO: sin mayúsculas, sin tildes ni otros diacríticos y
+    con los espacios simplificados. "josé  pérez" y "Jose Perez" dan la misma clave.
+
+    El id guardado no cambia (ni su HMAC): esto solo decide a qué persona inscrita se
+    refiere un id escrito de otra forma. Así un "lionel messi" o un "Nicolas Maduro"
+    sin tilde no dan un falso rechazo que no es culpa del reconocimiento."""
+    base = unicodedata.normalize("NFD", validar_id(id_persona))
+    sin_marcas = "".join(c for c in base if unicodedata.category(c) != "Mn")
+    return " ".join(sin_marcas.casefold().split())
+
+
 @dataclass(frozen=True)
 class Muestra:
     id: str
@@ -244,12 +256,22 @@ class BaseDatos:
         return resumen, pendiente
 
     def _comprobar_sello(self, contenido: bytes | None) -> None:
-        """Compara el CSV actual con el sello. Sin sello previo, sella el actual (TOFU)."""
+        """Compara el CSV actual con el sello.
+
+        Sin sello previo y con una BD que ya existe: con `bd.sello_estricto`, error
+        (alguien puede haber borrado el sello para colar una copia antigua); sin él,
+        se sella el CSV actual (TOFU). Para aceptar a propósito la BD actual: sellar()."""
         if not self.cfg.bd.anti_rollback:
             return
         sello = self._leer_sello()
         if sello is None:
             if contenido is not None:
+                if self.cfg.bd.sello_estricto:
+                    raise IntegridadBD(
+                        f"La base de datos existe pero falta su sello anti-rollback ({self.ruta_sello()}). "
+                        "Alguien puede haberlo borrado para colar una copia antigua. Si la BD es la "
+                        "buena (primera vez desde este equipo o con esta ruta, o tras restaurar un "
+                        "respaldo a propósito), séllala con: python -m biometria sellar")
                 self._escribir_sello(self._resumen(contenido))
             return
         actual = self._resumen(contenido)
@@ -345,10 +367,11 @@ class BaseDatos:
     # ------------------------------------------------------------------ #
     # Lectura y escritura del fichero
     # ------------------------------------------------------------------ #
-    def _leer_filas(self) -> list[tuple[str, str]]:
+    def _leer_filas(self, comprobar_sello: bool = True) -> list[tuple[str, str]]:
         """Lee y verifica el CSV. Devuelve (id, campo template) por fila."""
         if not self.ruta.is_file():
-            self._comprobar_sello(None)  # ¿la han borrado? (solo con anti_rollback)
+            if comprobar_sello:
+                self._comprobar_sello(None)  # ¿la han borrado? (solo con anti_rollback)
             return []
         bruto = self.ruta.read_bytes()
         try:
@@ -383,8 +406,25 @@ class BaseDatos:
                 )
             resultado.append((id_persona, campo))
         # Filas válidas una a una; ahora, ¿es el CSV que escribimos la última vez?
-        self._comprobar_sello(bruto)
+        if comprobar_sello:
+            self._comprobar_sello(bruto)
         return resultado
+
+    def sellar(self) -> int:
+        """Acepta A PROPÓSITO la BD actual como la buena y la sella (anti-rollback).
+
+        Verifica antes el HMAC de todas las filas (sin clave no se puede sellar nada
+        falso). Para cuando falta el sello con `bd.sello_estricto`: primera vez desde
+        otro equipo o ruta (p. ej. Docker y local), o tras restaurar un respaldo.
+        Devuelve el número de filas."""
+        with self._bloqueo():
+            filas = self._leer_filas(comprobar_sello=False)
+            self._obtener_claves()
+            contenido = self.ruta.read_bytes() if self.ruta.is_file() else None
+            if contenido is None:
+                raise ConfiguracionInvalida(f"No hay base de datos en {self.ruta}: nada que sellar")
+            self._escribir_sello(self._resumen(contenido))
+            return len(filas)
 
     def _escribir_filas(self, filas: list[tuple[str, str]]) -> None:
         total = len(filas)
@@ -437,12 +477,34 @@ class BaseDatos:
     def ids(self) -> list[str]:
         return sorted(self.por_id())
 
-    def templates_de(self, id_persona: str) -> list[np.ndarray]:
+    def resolver_id(self, id_persona: str, inscritos=None) -> str | None:
+        """El id INSCRITO al que se refiere `id_persona`: el mismo, o el que solo se
+        diferencia en mayúsculas, tildes o espacios (ver clave_busqueda). None si no
+        hay nadie. `inscritos` (ids ya leídos) evita volver a leer el fichero.
+
+        Si dos inscritos dan la misma clave (p. ej. "Jose" y "José"), solo vale el id
+        exacto: con otra forma, IdInvalido, para no elegir a uno a ciegas."""
         id_persona = validar_id(id_persona)
-        templates = self.por_id().get(id_persona)
-        if not templates:
-            raise IdNoInscrito(f"'{id_persona}' no está inscrito")
-        return templates
+        if inscritos is None:
+            inscritos = {id_fila for id_fila, _ in self._leer_filas()}
+        if id_persona in inscritos:
+            return id_persona
+        clave = clave_busqueda(id_persona)
+        coinciden = sorted(i for i in inscritos if clave_busqueda(i) == clave)
+        if len(coinciden) > 1:
+            raise IdInvalido(f"'{id_persona}' puede referirse a {', '.join(coinciden)}: escríbelo exactamente")
+        return coinciden[0] if coinciden else None
+
+    def id_canonico(self, id_persona: str) -> str:
+        """El id inscrito al que se refiere `id_persona`, o el propio id (validado) si es nuevo."""
+        return self.resolver_id(id_persona) or validar_id(id_persona)
+
+    def templates_de(self, id_persona: str) -> list[np.ndarray]:
+        agrupadas = self.por_id()
+        inscrito = self.resolver_id(id_persona, agrupadas)
+        if inscrito is None:
+            raise IdNoInscrito(f"'{validar_id(id_persona)}' no está inscrito")
+        return agrupadas[inscrito]
 
     def inscribir(self, id_persona: str, template) -> int:
         """Añade una muestra. Devuelve cuántas muestras tiene ya esa persona."""
@@ -453,6 +515,8 @@ class BaseDatos:
             # Se verifica y decodifica el fichero completo antes de reescribirlo:
             # nunca se vuelve a firmar contenido que no pasó la verificación.
             filas = self._cargar()
+            # "lionel messi" añade una muestra a "Lionel Messi", no crea a otra persona
+            id_persona = self.resolver_id(id_persona, {i for i, _, _ in filas}) or id_persona
             existentes = sum(id_fila == id_persona for id_fila, _, _ in filas)
             if existentes >= self.cfg.limites.max_muestras_por_id:
                 raise LimiteMuestras(
@@ -469,6 +533,7 @@ class BaseDatos:
         id_persona = validar_id(id_persona)
         with self._bloqueo():
             filas = self._cargar()  # verifica la integridad antes de reescribir
+            id_persona = self.resolver_id(id_persona, {i for i, _, _ in filas}) or id_persona
             quedan = [(id_fila, campo) for id_fila, campo, _ in filas if id_fila != id_persona]
             borradas = len(filas) - len(quedan)
             if borradas == 0:
@@ -509,9 +574,10 @@ class BaseDatos:
 
     def muestras_de(self, id_persona: str) -> list[tuple[str, np.ndarray]]:
         """[(clave, template)] de una persona, en el orden del fichero."""
-        id_persona = validar_id(id_persona)
+        filas = self._cargar()
+        id_persona = self.resolver_id(id_persona, {i for i, _, _ in filas}) or validar_id(id_persona)
         muestras = [(self.clave_muestra(campo), template)
-                    for id_fila, campo, template in self._cargar() if id_fila == id_persona]
+                    for id_fila, campo, template in filas if id_fila == id_persona]
         if not muestras:
             raise IdNoInscrito(f"'{id_persona}' no está inscrito")
         return muestras
@@ -521,6 +587,7 @@ class BaseDatos:
         id_persona = validar_id(id_persona)
         with self._bloqueo():
             filas = self._cargar()
+            id_persona = self.resolver_id(id_persona, {i for i, _, _ in filas}) or id_persona
             quedan = [(i, c) for i, c, _ in filas
                       if not (i == id_persona and self.clave_muestra(c) == clave)]
             if len(quedan) == len(filas):
@@ -538,9 +605,13 @@ class BaseDatos:
         id_persona, nuevo = validar_id(id_persona), validar_id(nuevo)
         with self._bloqueo():
             filas = self._cargar()
-            if not any(i == id_persona for i, _, _ in filas):
+            inscritos = {i for i, _, _ in filas}
+            id_persona = self.resolver_id(id_persona, inscritos) or id_persona
+            if id_persona not in inscritos:
                 raise IdNoInscrito(f"'{id_persona}' no está inscrito")
-            if nuevo != id_persona and any(i == nuevo for i, _, _ in filas):
+            # Otro inscrito con el mismo nombre (salvo mayúsculas/tildes) también choca;
+            # cambiar solo las mayúsculas o tildes de uno mismo sí se puede
+            if nuevo != id_persona and self.resolver_id(nuevo, inscritos - {id_persona}) is not None:
                 raise IdInvalido(f"Ya hay alguien inscrito como '{nuevo}'")
             claves: dict[str, str] = {}
             nuevas = []

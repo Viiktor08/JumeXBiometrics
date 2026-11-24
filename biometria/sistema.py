@@ -33,7 +33,8 @@ import numpy as np
 from biometria.bd import BaseDatos, validar_id
 from biometria.config import Config, cargar_config
 from biometria.detector import Detector
-from biometria.errores import DemasiadosIntentos, IdNoInscrito, MuestraIncoherente, TemplateNoFirmado
+from biometria.errores import (CaraYaInscrita, DemasiadosIntentos, IdNoInscrito, MuestraIncoherente,
+                               TemplateNoFirmado)
 from biometria.extractores import crear_extractor
 from biometria.imagen import OrigenImagen, cargar_imagen
 
@@ -176,7 +177,7 @@ class SistemaBiometrico:
             return float(np.mean(puntuaciones))
         return max(puntuaciones)
 
-    def _comprobar_coherencia(self, id_persona: str, template) -> None:
+    def _comprobar_coherencia(self, id_persona: str, template, anteriores=None) -> None:
         """Defensa contra el envenenamiento de la inscripción: una muestra nueva de
         una persona que YA existe tiene que parecerse a su PRIMERA muestra (la
         inscripción original). Así no se puede añadir la cara de un atacante como
@@ -190,7 +191,8 @@ class SistemaBiometrico:
         umbral = self.cfg.defensa.coherencia_muestra
         if umbral <= 0.0:
             return
-        anteriores = self.bd.por_id().get(validar_id(id_persona))
+        if anteriores is None:
+            anteriores = self.bd.por_id().get(self.bd.id_canonico(id_persona))
         if not anteriores:
             return  # persona nueva: nada con que comparar
         template = self.extractor.validar_template(template)
@@ -202,16 +204,46 @@ class SistemaBiometrico:
                 "usa una foto más parecida a las que ya tiene; si es otra persona, inscríbela con su nombre."
             )
 
+    def _comprobar_duplicado(self, template, inscritos: dict[str, list[np.ndarray]]) -> None:
+        """Defensa contra la misma cara con otro nombre: al crear una persona NUEVA,
+        su cara no puede parecerse a nadie ya inscrito más de `defensa.cara_duplicada`.
+        Si no, inscribir la foto de la víctima como "Víctima 2" haría que identificarla
+        saliera "ambiguo" (medido en la revisión) o con el nombre falso.
+
+        El mensaje no dice a quién se parece: con la inscripción abierta de la web lo
+        lee un usuario sin PIN. Ver THREAT_MODEL.md, paso 1."""
+        umbral = self.cfg.defensa.cara_duplicada
+        if umbral <= 0.0 or not inscritos:
+            return
+        mejor = max(self._puntuar(template, muestras) for muestras in inscritos.values())
+        if mejor >= umbral:
+            raise CaraYaInscrita(
+                "Esa cara ya está inscrita con otro nombre. Si es la misma persona, añade la "
+                "foto a su ficha; si de verdad es otra (p. ej. un gemelo), la tiene que "
+                "inscribir el administrador con `defensa.cara_duplicada` desactivado."
+            )
+
     def _inscribir(self, id_persona: str, template) -> ResultadoInscripcion:
         id_persona = validar_id(id_persona)
-        self._comprobar_coherencia(id_persona, template)
+        template = self.extractor.validar_template(template)
+        inscritos = self.bd.por_id()
+        # "lionel messi" es "Lionel Messi" si ya está inscrito (mayúsculas, tildes, espacios)
+        id_persona = self.bd.resolver_id(id_persona, inscritos) or id_persona
+        if id_persona in inscritos:
+            self._comprobar_coherencia(id_persona, template, inscritos[id_persona])
+        else:
+            self._comprobar_duplicado(template, inscritos)
         return ResultadoInscripcion(id_persona, self.bd.inscribir(id_persona, template))
 
-    def _verificar(self, id_persona: str, template, fiable: bool | None = None,
+    def _verificar(self, id_persona_pedido: str, template, fiable: bool | None = None,
                    redondear: bool = False) -> ResultadoVerificacion:
-        id_persona = validar_id(id_persona)
+        validar_id(id_persona_pedido)
         template = self.extractor.validar_template(template)
-        puntuacion = self._puntuar(template, self.bd.templates_de(id_persona))
+        inscritos = self.bd.por_id()
+        id_persona = self.bd.resolver_id(id_persona_pedido, inscritos)  # el id tal como está inscrito
+        if id_persona is None:
+            raise IdNoInscrito(f"'{validar_id(id_persona_pedido)}' no está inscrito")
+        puntuacion = self._puntuar(template, inscritos[id_persona])
         umbral = self.cfg.umbrales.verificacion
         aceptado = puntuacion >= umbral  # la decisión usa la puntuación exacta
         if redondear:
@@ -247,7 +279,7 @@ class SistemaBiometrico:
 
     def _comprobar_inscrito(self, id_persona: str) -> None:
         """Antes de procesar la foto: no gastar el detector en un id que no existe."""
-        if validar_id(id_persona) not in self.bd.por_id():
+        if self.bd.resolver_id(id_persona) is None:
             raise IdNoInscrito(f"'{validar_id(id_persona)}' no está inscrito")
 
     # ------------------------------------------------------------------ #
@@ -287,7 +319,8 @@ class SistemaBiometrico:
         # _contar=False cuando el template viene de una foto que el sistema acaba de
         # procesar (la web): ahí no hay hill-climbing, no gasta el cupo de intentos.
         if _contar:
-            self._contar_intento(validar_id(id_persona))  # límite anti hill-climbing por id
+            # Límite anti hill-climbing por PERSONA: "adele" y "ADELE" gastan el mismo cupo
+            self._contar_intento(self.bd.id_canonico(id_persona))
         fiable = self._exigir_firma(template, firma)
         return self._verificar(id_persona, template, fiable=fiable, redondear=True)
 

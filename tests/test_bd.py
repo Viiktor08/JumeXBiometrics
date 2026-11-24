@@ -6,7 +6,7 @@ import sys
 import numpy as np
 import pytest
 
-from biometria.bd import VARIABLE_CLAVE, BaseDatos, validar_id
+from biometria.bd import VARIABLE_CLAVE, BaseDatos, clave_busqueda, validar_id
 from biometria.errores import (
     BDCorrupta,
     ConfiguracionInvalida,
@@ -304,6 +304,53 @@ def test_ids_invalidos(id_persona):
 def test_id_unicode_se_guarda_bien(bd, extractor):
     bd.inscribir("José Pérez", template_aleatorio(extractor, 0))
     assert BaseDatos(bd.cfg, extractor).ids() == ["José Pérez"]
+
+
+@pytest.mark.parametrize("escrito, clave", [
+    ("Lionel Messi", "lionel messi"),
+    ("LIONEL  MESSI", "lionel messi"),
+    ("Nicolás Maduro", "nicolas maduro"),
+    ("Jorge Javier Vázquez", "jorge javier vazquez"),
+    ("Hwang Min-Hyun", "hwang min-hyun"),
+    ("Muñoz", "munoz"),
+])
+def test_clave_busqueda(escrito, clave):
+    assert clave_busqueda(escrito) == clave
+
+
+def test_buscar_id_sin_mayusculas_ni_tildes(bd, extractor):
+    """M4 de la revisión: el id se encuentra aunque se escriba con otras mayúsculas,
+    tildes o espacios; el id guardado (y su HMAC) no cambia."""
+    bd.inscribir("José Pérez", template_aleatorio(extractor, 1))
+    bd.inscribir("Lionel Messi", template_aleatorio(extractor, 2))
+    assert bd.resolver_id("jose  perez") == "José Pérez"
+    assert len(bd.templates_de("LIONEL MESSI")) == 1
+    assert [c for c, _ in bd.muestras_de("lionel messi")] == [c for c, _ in bd.muestras_de("Lionel Messi")]
+    # Inscribir con otra forma añade una muestra a la persona inscrita, no crea otra
+    assert bd.inscribir("lionel messi", template_aleatorio(extractor, 3)) == 2
+    assert bd.ids() == ["José Pérez", "Lionel Messi"]
+    # Una errata de letra sigue sin encontrarse
+    assert bd.resolver_id("Lionel Mesi") is None
+    with pytest.raises(IdNoInscrito):
+        bd.templates_de("Lionel Mesi")
+    assert bd.eliminar("jose pérez") == 1 and bd.ids() == ["Lionel Messi"]
+
+
+def test_resolver_id_con_dos_inscritos_que_solo_difieren_en_tildes(bd):
+    """Si ya hubiera "Jose Perez" y "José Pérez", solo vale el id exacto."""
+    inscritos = {"Jose Perez", "José Pérez"}
+    assert bd.resolver_id("José Pérez", inscritos) == "José Pérez"
+    with pytest.raises(IdInvalido, match="exactamente"):
+        bd.resolver_id("jose perez", inscritos)
+
+
+def test_renombrar_no_choca_con_otro_salvo_mayusculas(bd, extractor):
+    bd.inscribir("Ana", template_aleatorio(extractor, 1))
+    bd.inscribir("Luis", template_aleatorio(extractor, 2))
+    with pytest.raises(IdInvalido):
+        bd.renombrar("Ana", "LUIS")              # es Luis, aunque cambien las mayúsculas
+    bd.renombrar("ana", "Ána")                   # cambiar solo las tildes de uno mismo, sí
+    assert bd.ids() == ["Luis", "Ána"]
 
 
 def test_eliminar_persona(bd, extractor):

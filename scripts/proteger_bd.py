@@ -64,6 +64,8 @@ def main() -> int:
         print(mover_clave(args.clave_antigua.resolve(), cfg.bd.ruta_clave))
     sistema = SistemaBiometrico(cfg)
     try:
+        if cfg.bd.anti_rollback and cfg.bd.ruta.is_file() and not sistema.bd.ruta_sello().is_file():
+            sistema.bd.sellar()  # BD de antes del sello: se acepta a propósito (es lo que hace este script)
         cambios = sistema.bd.recodificar()
     except ErrorBiometrico as e:
         print(f"La BD no se ha tocado: [{e.codigo}] {e.mensaje}")

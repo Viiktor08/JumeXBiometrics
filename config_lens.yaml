@@ -40,6 +40,7 @@ bd:
   ruta_clave: ~/.jumex/clave_lens.key   # fuera de data/ (ver config.yaml)
   cifrar_templates: true
   anti_rollback: true
+  sello_estricto: true      # ver config.yaml
   agregacion: max
 
 umbrales:
@@ -57,6 +58,7 @@ defensa:
   # medir el sistema sin ellas o para no romper la interoperabilidad del enunciado.
   coherencia_muestra: 0.35   # ver config.yaml (contra la PRIMERA muestra)
   ancla_muestra: 0.20        # ver config.yaml
+  cara_duplicada: 0.60       # ver config.yaml
   # Contra el ajuste automático de un template por los métodos _t (hill-climbing):
   decimales_puntuacion_t: 2  # la puntuación que sale por _t se redondea a 2 decimales
   max_intentos_t: 50         # máx. comparaciones _t por id en la ventana (0 = sin límite)

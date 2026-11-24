@@ -164,7 +164,7 @@ pytest -q                                             # 245 tests
 docker compose exec web python -m biometria bd                                  # con la web levantada
 docker compose exec web python -m biometria identificar --foto Dataset/adele_2016.jpg
 docker compose run --rm --entrypoint python web -m biometria bd                 # sin levantar la web
-docker compose run --rm --entrypoint python web -m pytest -q -p no:cacheprovider  # tests en el contenedor
+docker compose --profile pruebas run --rm pruebas                              # tests (imagen aparte con pytest)
 ```
 
 `data/` se monta como volumen: ahí viven `lens/bd.csv` y las fotos de la galería.
@@ -453,6 +453,14 @@ caracteres. Empezar por letra o número evita la inyección de fórmulas al abri
 CSV con Excel (`=`, `+`, `-`, `@`). Se normalizan a Unicode NFC, de modo que
 "José" escrito de dos formas distintas es la misma persona.
 
+**Al buscar un id no se distinguen mayúsculas, tildes ni espacios repetidos**
+(`bd.clave_busqueda`): `verificar --id "lionel messi"` o `--id "Nicolás Maduro"`
+encuentran a `Lionel Messi` y `Nicolas Maduro`, y la respuesta devuelve el id tal
+como está inscrito. El id guardado (y su HMAC) no cambia. Inscribir con otra forma
+del nombre añade la muestra a esa persona, no crea otra, y el límite de intentos de
+`_t` es el mismo para todas las formas. Una errata de letra (`Lionel Mesi`) sigue
+sin encontrarse.
+
 **Otros límites:** como máximo **10 muestras por persona**
 (`limites.max_muestras_por_id`).
 
@@ -476,8 +484,9 @@ quiera. En Windows no hay bloqueo de fichero.
    que parecerse a su **primera** muestra (`coherencia_muestra`, paso 1 del
    THREAT_MODEL).
 
-El sistema **no comprueba que la cara no esté ya inscrita con otro nombre** (ver
-[limitaciones](#estado-del-proyecto-y-trabajo-pendiente)).
+Si la persona es **nueva** y su cara se parece al menos `cara_duplicada` (0,60) a
+alguien ya inscrito, se rechaza con `cara_ya_inscrita`: la misma cara con otro nombre
+rompería la identificación de la original. El mensaje no dice a quién se parece.
 
 **Verificar** (`id`, foto) — 1:1:
 1. Se comprueba que `id` está inscrito (antes de procesar la foto: un `id`
@@ -544,6 +553,9 @@ se interpreta como una errata y reciben un **template**.
 ---
 
 ## Cuánto acierta
+
+La evaluación completa (LFW, la galería real, robustez y ataques, antes y después de
+las defensas) está en [`docs/EVALUACION.md`](docs/EVALUACION.md).
 
 Para entender los números:
 
@@ -628,7 +640,8 @@ web y el Docker** (`data/lens/bd.csv`, con la clave `~/.jumex/clave_lens.key`).
 | `inscribir_sd` / `verificar_sd` / `identificar_sd` | Igual, con una **cara ya recortada** (sin detector) |
 | `inscribir_t --id ID --template T` / `verificar_t` / `identificar_t --template T` | Con un **template** (sin detector ni extractor) |
 | `extraer --foto F --salida T [--sin-detector]` | Guarda el template de una foto, para usarlo con los `_t` |
-| `bd` | Verifica la integridad de la base de datos y lista a los inscritos |
+| `bd` | Verifica la integridad de la base de datos y lista a los inscritos (con sus ids exactos) y las protecciones activas |
+| `sellar` | Acepta **a propósito** la BD actual y crea su sello anti-rollback (cuando falta el sello: primera vez desde otro equipo o ruta, o tras restaurar un respaldo). Verifica antes el HMAC de cada fila |
 | `estado` (o sin comando) | Versiones y estado del entorno |
 
 Cada comando imprime **una línea JSON** y devuelve un código de salida: `0` si la
@@ -677,9 +690,13 @@ formato de la base de datos (`f32:` + base64).
 | `id_invalido` | El nombre no cumple las reglas |
 | `id_no_inscrito` | Esa persona no está en la base de datos |
 | `muestra_no_encontrada` | Esa muestra no existe |
+| `muestra_incoherente` | La muestra nueva no se parece a la primera de esa persona |
+| `cara_ya_inscrita` | Se intenta crear una persona con una cara que ya está inscrita con otro nombre |
+| `template_no_firmado` | Un `_t` recibe un template sin firma válida de este sistema |
+| `demasiados_intentos` | Demasiadas comparaciones `_t` seguidas para el mismo id |
 | `limite_muestras` | La persona ya tiene el máximo de muestras |
 | `bd_corrupta` | El CSV no tiene el formato esperado |
-| `integridad_bd` | Una firma HMAC no cuadra: el CSV fue modificado fuera del sistema |
+| `integridad_bd` | Una firma HMAC no cuadra (el CSV fue modificado fuera del sistema), rollback, o falta el sello de una BD que existe (ver `sellar`) |
 | `configuracion_invalida` | Valor fuera de rango o falta un fichero |
 
 ### Desde Python
@@ -717,6 +734,7 @@ Los módulos sueltos también se pueden usar: `Detector` (`detectar`, `procesar`
 | `python -m biometria.camara [--umbral U]` | Detección en directo con la webcam: caras, confianza, puntos, resultado de la calidad y la cara alineada; con `s` guarda la foto, con `q` sale |
 | `python -m biometria.web [--tunel]` | Arranca JumeX Lens (ver siguiente apartado) |
 | `python scripts/arrancar_web.py [opciones de la web]` | Lo que ejecuta `docker compose up`: si no existe la BD de la web, la crea con las fotos de `Dataset/` (clave aleatoria nueva) y arranca la web |
+| `docker compose exec -T web python scripts/pruebas_revision.py` | Batería de ataques y medidas contra el sistema real (BD y clave temporales): foto exacta, robustez, `_sd`, firma de `_t`, hill-climbing, ataques a la BD, deriva con morphs, ids, entradas, CLI y duplicados. Resultados y análisis en [`docs/EVALUACION.md`](docs/EVALUACION.md) |
 
 ---
 
@@ -895,6 +913,7 @@ configuración se **valida**: un valor fuera de rango da un error claro
 | | `ruta_clave` | `~/.jumex/clave_lens.key` | Fichero de la clave (si no hay variable de entorno). Fuera de `data/` |
 | | `cifrar_templates` | `true` | Cifrar los templates con AES-GCM |
 | | `anti_rollback` | `true` | Sello junto a la clave: detecta volver a una BD antigua o borrarla |
+| | `sello_estricto` | `true` | Si la BD existe pero falta su sello: error en vez de fiarse (`python -m biometria sellar` la acepta a propósito) |
 | | `agregacion` | `max` | `max` o `media` de las muestras de una persona |
 | `umbrales` | `verificacion` | 0,35 | Puntuación mínima para aceptar al verificar |
 | | `identificacion` | 0,40 | Puntuación mínima para no devolver "desconocido" |
@@ -904,6 +923,7 @@ configuración se **valida**: un valor fuera de rango da un error claro
 | | `max_muestras_por_id` | 10 | Muestras máximas por persona |
 | `defensa` | `coherencia_muestra` | 0,35 | Al añadir una muestra a alguien que ya existe, similitud mínima con su **primera** muestra (0 = desactivado). Contra el envenenamiento de la inscripción y la deriva con morphs |
 | | `ancla_muestra` | 0,20 | Al verificar o identificar, las muestras extra solo cuentan si la foto se parece al menos esto a la **primera** muestra (0 = desactivado). Una muestra envenenada no sirve para colar a otro |
+| | `cara_duplicada` | 0,60 | Al crear una persona **nueva**, si su cara se parece al menos esto a alguien inscrito: `cara_ya_inscrita` (0 = desactivado). Contra la misma cara con otro nombre |
 | | `decimales_puntuacion_t` | 2 | Decimales a los que se redondea la puntuación que devuelven los `_t` (0 = sin redondeo). Contra el hill-climbing |
 | | `max_intentos_t` | 50 | Máx. comparaciones `_t` por id en la ventana (0 = sin límite). Contra el hill-climbing |
 | | `ventana_intentos_s` | 60 | Ventana del límite anterior, en segundos |
@@ -942,7 +962,8 @@ completo, con cada defensa medida y probada con tests, está en
 | **Hill-climbing** (ajustar un template probándolo hasta colarlo) | ✅ Cada variación pierde la firma y se rechaza sin dar puntuación. El redondeo y el límite de intentos solo lo retrasan: sin firma, el ataque necesita unos cientos de consultas |
 | **Gemelos y dobles** | ✅ Si el 1.º y el 2.º candidato están a menos de 0,10, desconocido (`ambiguo`). ⚠️ No sirve si el gemelo no está inscrito |
 | **Lee `bd.csv`** | ✅ Templates cifrados con AES-256-GCM; la clave está fuera de `data/` |
-| **Restaura una BD antigua o la borra** | ✅ Sello anti-rollback junto a la clave → `integridad_bd`. ⚠️ Si además borra el sello (necesita escribir en `~/.jumex/`), la copia antigua se acepta |
+| **Restaura una BD antigua o la borra** (aunque borre también el sello) | ✅ Sello anti-rollback junto a la clave → `integridad_bd`. Si falta el sello de una BD que existe, también error (`sello_estricto`); solo `python -m biometria sellar`, con la clave, la acepta |
+| **Inscribe la cara de otra persona con un nombre nuevo** (para que su identificación salga "ambiguo") | ✅ Se rechaza: `cara_ya_inscrita` si se parece ≥ 0,60 a alguien inscrito |
 | **Se salta el detector** (`_sd`, o la cara marcada a mano en la web) con algo que no es una cara | ✅ YuNet comprueba que hay una cara → `sin_cara` |
 | **Fuerza bruta del PIN, saturar o enumerar la web** | ✅ Bloqueo de PIN, sesión que caduca, límites por IP, timeouts, verificar sin revelar inscritos |
 | **Imágenes malintencionadas** | Límites de bytes y píxeles (doble), decodificación solo mediante OpenCV, nunca se cargan objetos con pickle |
@@ -1043,8 +1064,8 @@ equipo), pero el docente aclaró que son **50**: las **49** fotos que entregó
 - **Las fotos de inscripción están en el repositorio** (`Dataset/`): quien lo tenga puede verificarse como cualquiera con su foto exacta.
 - **Si el sistema se ejecuta en el ordenador del atacante**, la clave es suya: el cifrado, la firma de templates y el sello no le frenan.
 - **Gemelos no inscritos** (Aitana Etxebarria, James Phelps, Mary-Kate Olsen): el gemelo puede pasar por su hermano.
-- **Una cara ya inscrita con otro nombre** no se detecta: si alguien la inscribe (admin o inscripción abierta), la identificación de esa persona sale `ambiguo`.
-- Algunos ids tienen erratas que vienen de los nombres de fichero del Dataset (`Arianna Grande`, `Serenna Williams`, `Wiliem Dafoe`…) y los ids distinguen mayúsculas: hay que escribir el nombre exactamente como sale en `python -m biometria bd`.
+- **Gemelos al inscribir:** `cara_duplicada` puede rechazar al gemelo de alguien ya inscrito como si fuera la misma cara; para inscribirlo, el admin desactiva esa defensa un momento.
+- Algunos ids tienen erratas de letras que vienen de los nombres de fichero del Dataset (`Arianna Grande`, `Serenna Williams`, `Wiliem Dafoe`, `Zack Efron`, `Hunter Schufer`): esas letras hay que escribirlas como salen en `python -m biometria bd`. Las mayúsculas y las tildes dan igual.
 
 ---
 
@@ -1094,6 +1115,7 @@ Decisiones tomadas donde el enunciado es ambiguo o deja libertad:
 
 ## Problemas frecuentes
 
+- **`integridad_bd` con "falta su sello anti-rollback":** la BD existe pero no hay sello para ella en `~/.jumex/`. Pasa la primera vez que se usa la misma BD desde otra ruta (por ejemplo, en local después de en Docker: el sello va por ruta) o si alguien lo ha borrado. Si la BD es la buena: `python -m biometria sellar` (o `docker compose exec web python -m biometria sellar`).
 - **`Address already in use` al arrancar la web:** queda un servidor anterior abierto. En macOS el proceso se llama `Python` (con mayúscula): `lsof -nP -iTCP:8000 -sTCP:LISTEN` te dice su PID y `kill <PID>` lo cierra. O arranca en otro puerto con `--puerto 8080`.
 - **`CERTIFICATE_VERIFY_FAILED` al descargar modelos en macOS:** el Python de python.org no trae certificados. Ejecuta `/Applications/Python\ 3.11/Install\ Certificates.command` o lanza el script con `SSL_CERT_FILE=/etc/ssl/cert.pem`.
 - **`integridad_bd` sin haber tocado nada:** la clave no es la que firmó la BD (se perdió `~/.jumex/clave_*.key`, o `BIOMETRIA_HMAC_KEY` es otra). Si dice **rollback**, el CSV no es el último que escribió el sistema: alguien lo ha sustituido por una copia. La BD no se puede recuperar sin su clave: hay que inscribir de nuevo.

@@ -57,7 +57,7 @@ from urllib.parse import parse_qs, urlsplit
 import numpy as np
 
 from biometria.config import RAIZ_REPO, cargar_config
-from biometria.bd import validar_id
+from biometria.bd import clave_busqueda, validar_id
 from biometria.errores import ErrorBiometrico, IdInvalido, MuestraNoEncontrada
 from biometria.sistema import SistemaBiometrico
 from biometria.web.analisis import (
@@ -237,12 +237,13 @@ class Aplicacion:
         if self.segundos_inscripcion_abierta() <= 0:
             return False, "requiere_admin"
         try:
-            ya_existe = validar_id(id_persona) in self.sistema.bd.por_id()
+            inscrito = self.sistema.bd.resolver_id(id_persona)  # también "adele" -> "Adele"
         except ErrorBiometrico:
             return True, ""  # id inválido o BD rota: que el flujo normal dé el error concreto
-        if ya_existe and validar_id(id_persona) not in self._inscritos_abiertos:
+        nombre = inscrito or validar_id(id_persona)
+        if inscrito is not None and nombre not in self._inscritos_abiertos:
             return False, "nombre_ocupado"
-        if (validar_id(id_persona) not in self._inscritos_abiertos
+        if (nombre not in self._inscritos_abiertos
                 and len(self._inscritos_abiertos) >= self.MAX_INSCRITOS_ABIERTOS):
             return False, "inscripcion_llena"
         return True, ""
@@ -302,7 +303,7 @@ class Aplicacion:
 
     def persona(self, id_persona: str) -> dict:
         """Ficha de una persona: todas sus muestras con su foto (si la hay)."""
-        id_persona = validar_id(id_persona)
+        id_persona = self.sistema.bd.id_canonico(id_persona)  # la galería va por el id inscrito
         claves = [c for c, _ in self.sistema.bd.muestras_de(id_persona)]
         principal = self.galeria.principal(id_persona, claves)
         return {"ok": True, "id": id_persona, "foto": self.url_foto(id_persona, claves),
@@ -315,21 +316,24 @@ class Aplicacion:
     # ------------------------------------------------------------------ #
     def eliminar(self, id_persona: str) -> dict:
         with self.lock:
+            id_persona = self.sistema.bd.id_canonico(id_persona)
             borradas = self.sistema.bd.eliminar(id_persona)
             self.galeria.eliminar(id_persona)
-            return {"ok": True, "resultado": {"id": validar_id(id_persona), "muestras_borradas": borradas}}
+            return {"ok": True, "resultado": {"id": id_persona, "muestras_borradas": borradas}}
 
     def eliminar_muestra(self, id_persona: str, clave: str) -> dict:
         with self.lock:
+            id_persona = self.sistema.bd.id_canonico(id_persona)
             quedan = self.sistema.bd.eliminar_muestra(id_persona, clave)
             if quedan == 0:
                 self.galeria.eliminar(id_persona)
             else:
                 self.galeria.eliminar_muestra(id_persona, clave)
-            return {"ok": True, "resultado": {"id": validar_id(id_persona), "quedan": quedan}}
+            return {"ok": True, "resultado": {"id": id_persona, "quedan": quedan}}
 
     def fijar_principal(self, id_persona: str, clave: str) -> dict:
         with self.lock:
+            id_persona = self.sistema.bd.id_canonico(id_persona)
             claves = [c for c, _ in self.sistema.bd.muestras_de(id_persona)]
             if clave not in claves or not self.galeria.tiene_foto(id_persona, clave):
                 raise MuestraNoEncontrada("Esa muestra no existe o no tiene foto")
@@ -338,8 +342,9 @@ class Aplicacion:
 
     def renombrar(self, id_persona: str, nuevo: str) -> dict:
         with self.lock:
+            id_persona = self.sistema.bd.id_canonico(id_persona)
             claves = self.sistema.bd.renombrar(id_persona, nuevo)
-            self.galeria.renombrar(id_persona, nuevo, claves)
+            self.galeria.renombrar(id_persona, validar_id(nuevo), claves)
             return self.persona(nuevo)
 
     # ------------------------------------------------------------------ #
@@ -383,7 +388,8 @@ class Aplicacion:
         La puntuación es la de la foto frente a un vector "fantasma" que sale de un
         hash del nombre (con una sal de este proceso): parece la de un impostor
         cualquiera y es la misma cada vez que se prueba ese nombre."""
-        semilla = hashlib.sha256(self._sal + validar_id(id_persona).casefold().encode("utf-8")).digest()
+        # Misma puntuación para "Nombre Inventado" y "nombre inventado": no se distinguen
+        semilla = hashlib.sha256(self._sal + clave_busqueda(id_persona).encode("utf-8")).digest()
         fantasma = np.random.default_rng(int.from_bytes(semilla[:8], "big")).standard_normal(
             analisis.template.size).astype(np.float32)
         fantasma /= np.linalg.norm(fantasma)

@@ -10,6 +10,8 @@
 # - Ctrl+C lo para (o `docker compose down` si se lanzó con -d).
 # - La CLI, dentro del contenedor y con la misma BD:
 #     docker compose exec web python -m biometria verificar --id "Keanu Reeves" --foto Dataset/keanu_reeves_2021.png
+# - Los tests (imagen aparte, con pytest):
+#     docker compose --profile pruebas run --rm pruebas
 #
 # Nada secreto viaja con el repositorio:
 # - La primera vez se crea la BD (data/lens/) con las fotos de Dataset/ y una clave
@@ -18,7 +20,9 @@
 #   (o se fija con BIOMETRIA_ADMIN_PASS en un fichero .env, ver env.ejemplo).
 
 x-web: &web
-  build: .
+  build:
+    context: .
+    target: final          # sin dependencias de desarrollo (ver Dockerfile)
   image: jumex-biometrics
   entrypoint: ["python", "scripts/arrancar_web.py"]
   environment:
@@ -44,3 +48,13 @@ services:
     <<: *web
     profiles: ["publico"]
     command: ["--host", "0.0.0.0", "--puerto", "8000", "--no-abrir", "--tunel"]
+
+  # Tests y scripts de evaluación (pytest y matplotlib). No arranca con `docker compose up`.
+  #   docker compose --profile pruebas run --rm pruebas
+  #   docker compose --profile pruebas run --rm --entrypoint python pruebas scripts/evaluar.py --tabla
+  pruebas:
+    build:
+      context: .
+      target: pruebas
+    image: jumex-biometrics-pruebas
+    profiles: ["pruebas"]

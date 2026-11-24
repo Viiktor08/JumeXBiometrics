@@ -57,13 +57,13 @@ configuración y **se pueden desactivar**, para medir el sistema sin ellas.
 
 | # | Ataque | Defensa | Estado |
 |---|---|---|---|
-| 1 | Envenenar la inscripción (añadir mi cara como muestra de la víctima, o una cadena de morphs) | `coherencia_muestra` contra la **primera** muestra + `ancla_muestra` al verificar e identificar | ✅ |
+| 1 | Envenenar la inscripción (añadir mi cara como muestra de la víctima, una cadena de morphs, o su cara con otro nombre) | `coherencia_muestra` contra la **primera** muestra + `ancla_muestra` al verificar e identificar + `cara_duplicada` al crear personas | ✅ |
 | R | Cualquiera inscribe, borra o lee la BD por la web | Dos roles: usuario (verificar/identificar) y admin con PIN | ✅ |
 | 2 | Template fabricado o copiado de la BD en `_t` | Firma HMAC de los templates; `_t` **rechaza** los no firmados | ✅ |
 | 3 | Hill-climbing con la puntuación | Firma obligatoria + redondeo + límite de intentos | ✅ |
 | 4 | Gemelos y dobles en identificación | Margen mínimo entre el 1.º y el 2.º candidato | ✅ (parcial, ver riesgos) |
 | 5 | `_sd` (o la cara marcada a mano en la web) con una imagen que no es una cara | YuNet comprueba que hay una cara (sin alinear) | ✅ |
-| 6 | Leer la BD, escribirla con la clave al lado, rollback, escrituras a la vez | Clave aparte, cifrado AES-GCM, sello anti-rollback, bloqueo de fichero | ✅ |
+| 6 | Leer la BD, escribirla con la clave al lado, rollback (también borrando el sello), escrituras a la vez | Clave aparte, cifrado AES-GCM, sello anti-rollback estricto, bloqueo de fichero | ✅ |
 | 7 | Foto de una foto, pantalla, máscara (presentación), o la foto exacta de `Dataset/` | Sin vivacidad: riesgo aceptado y documentado | ⚠️ |
 | 8 | Fuerza bruta del PIN, saturar el servidor, robar la sesión, enumerar nombres | Bloqueo del PIN, sesión que caduca, límites por IP, timeouts, respuesta uniforme | ✅ |
 
@@ -111,6 +111,15 @@ como la víctima con 0,92–0,98 (antes 0,00–0,06), sin que la víctima notara
    la persona real, sus fotos extra le siguen ayudando (fotos de otra época, otra
    luz). En LFW, solo el 0,12 % de los impostores llega a 0,20 con la víctima.
 
+3. **La misma cara con otro nombre** (`defensa.cara_duplicada: 0.60`). La coherencia
+   solo mira las muestras de la **misma** persona. La revisión inscribió la foto de una
+   víctima como "Copia De Prueba" y, desde entonces, identificarla daba `ambiguo` →
+   desconocido. Ahora, al crear una persona **nueva**, si su cara se parece al menos
+   0,60 a alguien inscrito, `cara_ya_inscrita`. El mensaje no dice a quién se parece,
+   porque con `--inscripcion-abierta` lo lee un usuario sin PIN. Entre las 50 personas
+   del Dataset la mayor similitud es 0,25, y una foto distinta de la misma persona suele
+   estar entre 0,5 y 0,9 (LFW). Las fotos públicas exactas del Dataset dan 1,00.
+
 **Límite conocido.** No para a quien envenena con una cara que **de verdad se
 parece** a la víctima (un gemelo, un morph que ya supera 0,35 con la original), ni
 a quien edita la BD con la clave (escenario 2). La primera muestra de cada persona
@@ -119,9 +128,11 @@ es la raíz de confianza.
 **Cómo se comprueba.** `test_defensas.py::test_coherencia_bloquea_envenenamiento`,
 `::test_coherencia_desactivada_deja_pasar_el_ataque`,
 `::test_coherencia_compara_con_la_primera_muestra`,
-`::test_deriva_con_morphs_no_cuela_al_atacante` y
+`::test_deriva_con_morphs_no_cuela_al_atacante`,
 `::test_sin_ancla_la_deriva_si_cuela_al_atacante` (prueba de que es el ancla la
-que lo para).
+que lo para), `::test_misma_cara_con_otro_nombre_se_rechaza`,
+`::test_sin_la_defensa_el_duplicado_rompe_la_identificacion` y
+`test_web.py::test_inscripcion_abierta_no_admite_una_cara_ya_inscrita`.
 
 ---
 
@@ -327,10 +338,16 @@ identificar). Ahora ese recorte pasa por la misma comprobación (`sin_cara`).
 Antes de reescribir siempre se verifica el fichero entero: nunca se vuelve a
 firmar contenido manipulado.
 
-**Qué NO resuelve.** Si se **borra el sello** (`~/.jumex/sello-*.json`) y se pone
-una copia antigua de la BD, el sistema no tiene con qué compararla y se fía del CSV
-que encuentra: medido, una BD de 48 personas sustituyó a la de 49 sin aviso. Hace
-falta poder escribir en `~/.jumex/`, no la clave. Además, quien tenga la clave (o pueda escribir en `~/.jumex/`) puede
+5. **Sello estricto** (`bd.sello_estricto: true`). Antes, si faltaba el sello, el
+   sistema se fiaba del CSV que encontraba y lo sellaba: borrando
+   `~/.jumex/sello-*.json` y poniendo una copia antigua, una BD de 48 personas
+   sustituyó a la de 49 sin aviso (medido en la revisión). Ahora, si la BD existe y
+   su sello no, `integridad_bd`. Para aceptarla a propósito (primera vez desde otra
+   ruta, por ejemplo Docker y local, o tras restaurar un respaldo) está
+   `python -m biometria sellar`, que verifica antes el HMAC de todas las filas: sin la
+   clave no se puede sellar una BD falsa.
+
+**Qué NO resuelve.** Quien tenga la clave (o pueda escribir en `~/.jumex/`) puede
 falsificarlo todo. En Windows no hay `flock` (la escritura sigue siendo atómica).
 Si el proceso muere en mitad de una escritura, el sello admite dos versiones
 hasta la siguiente escritura.
@@ -340,7 +357,10 @@ hasta la siguiente escritura.
 `::test_lectura_a_mitad_de_escritura_no_da_falso_rollback`,
 `::test_bd_cifrada_no_deja_leer_los_templates_y_la_clave_va_aparte`,
 `::test_recodificar_cifra_una_bd_en_claro`,
-`::test_dos_procesos_escribiendo_a_la_vez_no_pierden_muestras`, y en `test_bd.py`
+`::test_dos_procesos_escribiendo_a_la_vez_no_pierden_muestras`,
+`::test_borrar_el_sello_y_restaurar_una_copia_se_detecta`,
+`::test_sin_sello_estricto_se_confia_en_la_bd_sin_sello`,
+`::test_sellar_no_acepta_filas_manipuladas`, y en `test_bd.py`
 la detección de filas cambiadas, borradas, duplicadas o reordenadas.
 
 ---
@@ -428,14 +448,14 @@ Los decimos nosotros antes de que los encuentre el equipo rival.
    rechazar las comparaciones casi idénticas (≥ 0,97–0,99) a una muestra guardada.
 10. **El rival como operador** (ver "Dos escenarios"): si ejecuta el sistema en su
     ordenador, la clave es suya y las defensas de los pasos 2, 3, 6 y 8 no le afectan.
-11. **Borrar el sello** y restaurar una copia antigua de la BD (paso 6): sin sello,
-    se confía en el CSV actual. Hace falta escribir en `~/.jumex/`.
-12. **La misma cara con otro nombre.** La coherencia solo mira las muestras de la
-    **misma** persona. Si alguien inscribe la foto de la víctima con otro nombre (el
-    admin, o cualquiera con `--inscripcion-abierta`), identificar a la víctima da
-    `ambiguo` → desconocido (medido: `id: null, ambiguo: true`); verificar sigue
-    funcionando. Mitigación posible, no implementada: al crear un id nuevo,
-    identificar antes y rechazar si alguien supera el umbral.
-13. **Ids exactos.** Los ids distinguen mayúsculas y salen del nombre de fichero del
-    Dataset, con sus erratas (`Arianna Grande`, `Serenna Williams`…): verificar
-    con el nombre bien escrito da un rechazo que no es culpa del reconocimiento.
+11. **Gemelos al inscribir.** La defensa contra la misma cara con otro nombre
+    (`cara_duplicada`, paso 1) puede rechazar al gemelo de alguien ya inscrito: para
+    ArcFace son casi la misma cara. Para inscribirlo, el admin la desactiva un momento.
+12. **Erratas en los ids.** Al buscar un id no cuentan las mayúsculas, las tildes ni
+    los espacios de más (`lionel messi` → `Lionel Messi`), pero las letras sí. Los ids
+    salen del nombre de fichero del Dataset, con sus erratas (`Arianna Grande`,
+    `Serenna Williams`…): verificar con el nombre bien escrito da un rechazo que no es
+    culpa del reconocimiento. Detalle de seguridad: el límite de intentos de `_t` se
+    cuenta por persona, así que cambiar las mayúsculas no da un cupo nuevo; y en la
+    web, un nombre inexistente da la misma puntuación "fantasma" se escriba como se
+    escriba.

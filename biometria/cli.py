@@ -127,6 +127,7 @@ def _crear_parser() -> argparse.ArgumentParser:
     p.add_argument("--sin-detector", action="store_true", help="como los métodos _sd")
 
     sub.add_parser("bd", help="verifica la integridad de la BD y lista los inscritos")
+    sub.add_parser("sellar", help="acepta la BD actual como la buena y crea su sello anti-rollback")
     sub.add_parser("estado", help="versiones y estado del entorno")
     return parser
 
@@ -150,6 +151,10 @@ def ejecutar(args: argparse.Namespace) -> dict:
         ruta_firma.write_text(sistema.firmar(template), encoding="ascii")
         return {"operacion": "extraer", "salida": str(args.salida), "firma": str(ruta_firma),
                 "dimension": int(template.size)}
+    if comando == "sellar":
+        filas = sistema.bd.sellar()
+        return {"operacion": "sellar", "ruta": str(sistema.bd.ruta), "muestras": filas,
+                "sello": str(sistema.bd.ruta_sello())}
     if comando == "bd":
         agrupadas = sistema.bd.por_id()
         d = sistema.cfg.defensa
@@ -157,10 +162,14 @@ def ejecutar(args: argparse.Namespace) -> dict:
                 "personas": len(agrupadas), "muestras": sum(len(t) for t in agrupadas.values()),
                 "protecciones": {"cifrado": sistema.cfg.bd.cifrar_templates,
                                  "anti_rollback": sistema.cfg.bd.anti_rollback,
+                                 "sello_estricto": sistema.cfg.bd.sello_estricto,
                                  "clave_junto_a_bd": sistema.bd.clave_junto_a_bd(),
                                  "exigir_firma_t": d.exigir_firma_t,
                                  "margen_identificacion": d.margen_identificacion,
-                                 "cara_en_sd": d.cara_en_sd},
+                                 "cara_en_sd": d.cara_en_sd,
+                                 "coherencia_muestra": d.coherencia_muestra,
+                                 "ancla_muestra": d.ancla_muestra,
+                                 "cara_duplicada": d.cara_duplicada},
                 "ids": {id_persona: len(t) for id_persona, t in sorted(agrupadas.items())}}
 
     metodo = getattr(sistema, comando)

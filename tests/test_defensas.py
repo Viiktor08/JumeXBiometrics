@@ -13,8 +13,8 @@ import pytest
 
 from biometria.bd import VARIABLE_CLAVE
 from biometria.config import RAIZ_REPO
-from biometria.errores import (DemasiadosIntentos, IntegridadBD, MuestraIncoherente, SinCara,
-                               TemplateNoFirmado)
+from biometria.errores import (CaraYaInscrita, DemasiadosIntentos, IntegridadBD, MuestraIncoherente,
+                               SinCara, TemplateNoFirmado)
 from biometria.extractores.arcface import MODELO_POR_DEFECTO
 from biometria.sistema import SistemaBiometrico
 from tests.conftest import cfg_con
@@ -132,6 +132,39 @@ def test_coherencia_compara_con_la_primera_muestra(cfg_tmp):
         sistema.inscribir_t("P", paso2)
 
 
+def test_misma_cara_con_otro_nombre_se_rechaza(cfg_tmp, ruta_astronauta):
+    """M3 de la revisión: inscribir la foto de alguien con OTRO nombre se rechaza, y
+    su identificación sigue funcionando. Con su propio nombre, la foto sí entra."""
+    sistema = SistemaBiometrico(cfg_con(cfg_tmp, defensa={"cara_duplicada": 0.60}))
+    sistema.inscribir("Eileen Collins", ruta_astronauta)
+    with pytest.raises(CaraYaInscrita) as e:
+        sistema.inscribir("Copia De Eileen", ruta_astronauta)
+    assert "Eileen" not in e.value.mensaje                # no dice a quién se parece
+    r = sistema.identificar(ruta_astronauta)
+    assert r.id == "Eileen Collins" and not r.ambiguo
+    assert sistema.inscribir("Eileen Collins", ruta_astronauta).muestras == 2
+
+
+def test_sin_la_defensa_el_duplicado_rompe_la_identificacion(cfg_tmp, ruta_astronauta):
+    """Prueba de que es `cara_duplicada` la que lo para: sin ella, la víctima sale ambigua."""
+    sistema = SistemaBiometrico(cfg_con(cfg_tmp, defensa={"cara_duplicada": 0.0}))
+    sistema.inscribir("Eileen Collins", ruta_astronauta)
+    sistema.inscribir("Copia De Eileen", ruta_astronauta)
+    r = sistema.identificar(ruta_astronauta)
+    assert r.id is None and r.ambiguo
+
+
+def test_limite_de_intentos_cuenta_por_persona_aunque_cambie_el_nombre(cfg_tmp):
+    """Con la búsqueda sin mayúsculas ni tildes, cambiar cómo se escribe el nombre no
+    da un cupo nuevo de intentos _t."""
+    sistema = SistemaBiometrico(cfg_con(cfg_tmp, defensa={"max_intentos_t": 3, "exigir_firma_t": False}))
+    sistema.inscribir_t("Lionel Messi", _vector(5))
+    for nombre in ("lionel messi", "LIONEL MESSI", "Lionel Messi"):
+        assert sistema.verificar_t(nombre, _vector(5)).id == "Lionel Messi"
+    with pytest.raises(DemasiadosIntentos):
+        sistema.verificar_t("lionel  messi", _vector(5))
+
+
 # --- Paso 2: firma de templates (contra templates fabricados en _t) ----------
 
 def test_firma_distingue_template_propio_de_fabricado(cfg_tmp, ruta_astronauta):
@@ -176,7 +209,9 @@ def test_la_puntuacion_de_t_se_redondea(cfg_tmp, ruta_astronauta):
 
 
 def test_limite_de_intentos_frena_el_barrido(cfg_tmp, ruta_astronauta):
-    sistema = SistemaBiometrico(cfg_con(cfg_tmp, defensa={"max_intentos_t": 5, "ventana_intentos_s": 60}))
+    # cara_duplicada 0: aquí se inscribe a propósito la misma cara con dos nombres
+    sistema = SistemaBiometrico(cfg_con(cfg_tmp, defensa={"max_intentos_t": 5, "ventana_intentos_s": 60,
+                                                          "cara_duplicada": 0.0}))
     sistema.inscribir("Eileen", ruta_astronauta)
     t = sistema.extraer(ruta_astronauta)
     for _ in range(5):
@@ -309,6 +344,44 @@ def test_borrar_la_bd_entera_se_detecta(cfg_sello):
     sistema.bd.ruta.unlink()
     with pytest.raises(IntegridadBD, match="desaparecido"):
         sistema.bd.ids()
+
+
+def _rollback_borrando_el_sello(sistema):
+    """B2 de la revisión: guardar una copia, seguir, borrar el sello y restaurar la copia."""
+    sistema.inscribir_t("A", _vector(1))
+    copia = sistema.bd.ruta.read_bytes()
+    sistema.inscribir_t("B", _vector(2))
+    sistema.bd.ruta_sello().unlink()
+    sistema.bd.ruta.write_bytes(copia)
+
+
+def test_borrar_el_sello_y_restaurar_una_copia_se_detecta(cfg_sello):
+    sistema = SistemaBiometrico(cfg_con(cfg_sello, bd={"sello_estricto": True}))
+    _rollback_borrando_el_sello(sistema)
+    with pytest.raises(IntegridadBD, match="falta su sello"):
+        sistema.bd.ids()
+    # Aceptarla es una decisión explícita del admin (python -m biometria sellar)
+    assert sistema.bd.sellar() == 1
+    assert sistema.bd.ids() == ["A"]
+
+
+def test_sin_sello_estricto_se_confia_en_la_bd_sin_sello(cfg_sello):
+    """El comportamiento anterior (TOFU), que era el agujero: la copia antigua se acepta."""
+    sistema = SistemaBiometrico(cfg_con(cfg_sello, bd={"sello_estricto": False}))
+    _rollback_borrando_el_sello(sistema)
+    assert sistema.bd.ids() == ["A"]
+
+
+def test_sellar_no_acepta_filas_manipuladas(cfg_sello):
+    """sellar() verifica el HMAC de cada fila: sin la clave no se puede sellar una BD falsa."""
+    sistema = SistemaBiometrico(cfg_con(cfg_sello, bd={"sello_estricto": True}))
+    sistema.inscribir_t("A", _vector(1))
+    sistema.bd.ruta_sello().unlink()
+    lineas = sistema.bd.ruta.read_text(encoding="utf-8").splitlines()
+    lineas[1] = lineas[1].replace("A,", "Intruso,", 1)
+    sistema.bd.ruta.write_text("\n".join(lineas) + "\n", encoding="utf-8")
+    with pytest.raises(IntegridadBD):
+        sistema.bd.sellar()
 
 
 def test_el_sello_manipulado_se_detecta(cfg_sello):

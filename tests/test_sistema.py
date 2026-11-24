@@ -78,6 +78,17 @@ def test_id_invalido_antes_de_procesar_la_foto(sistema):
         sistema.inscribir("=1+1", "no_existe.jpg")
 
 
+def test_ids_sin_mayusculas_ni_tildes(sistema, ruta_astronauta):
+    """verificar con el nombre escrito de otra forma encuentra a la persona y devuelve su id real."""
+    sistema.inscribir("Eileen Collins", ruta_astronauta)
+    r = sistema.verificar("eileen  COLLINS", ruta_astronauta)
+    assert r.aceptado and r.id == "Eileen Collins"
+    assert sistema.inscribir("EILEEN COLLINS", ruta_astronauta).muestras == 2
+    assert sistema.bd.ids() == ["Eileen Collins"]
+    with pytest.raises(IdNoInscrito):
+        sistema.verificar("Eileen Colins", ruta_astronauta)  # errata de letra: no
+
+
 def test_errores_del_detector_llegan_al_llamador(sistema, cfg_tmp, astronauta):
     doble = np.hstack([astronauta, astronauta])
     estricto = SistemaBiometrico(cfg_con(cfg_tmp, detector={"varias_caras": "error"}))
