@@ -353,7 +353,8 @@ documentados en `THREAT_MODEL.md`:
    la inscribe con una foto equivocada, el sistema se la cree.
 8. **Las fotos de inscripción están en el repositorio** (`Dataset/`, para que
    `docker compose up` funcione solo): con la foto exacta de alguien, verificar da
-   1,00. Son fotos públicas de famosos y el repo es privado, pero el rival lo tiene.
+   1,00. El repositorio es público, así que cualquiera tiene esas fotos (son fotos
+   públicas de famosos, sacadas de internet).
 9. **El rival ejecutando el sistema en su ordenador** tiene la clave (ver arriba).
 10. **Gemelos al inscribir**: la defensa contra la misma cara con otro nombre puede
     rechazar al gemelo de alguien inscrito. El admin la desactiva un momento para

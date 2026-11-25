@@ -189,15 +189,15 @@ python scripts/descargar_modelos.py          # ~290 MB la primera vez (ArcFace);
 pytest -q                                    # 270 tests
 ```
 
-- El repositorio es **privado**: hay que tener acceso (Settings → Collaborators).
+- El repositorio es **público**: se clona sin pedir acceso. Para subir cambios hay que ser colaborador (Settings → Collaborators).
 - **No clones dentro de OneDrive, Dropbox o iCloud.** Esos servicios dejan ficheros
   de `.git` solo en la nube y git empieza a dar `Operation timed out`. Usa una
   carpeta normal (p. ej. `~/dev`). El entorno virtual, también fuera.
 - **`Dataset/` (las 49 fotos del docente y la de Lionel Messi, la persona elegida por
   el equipo) sí está en el repositorio**, para que
   `docker compose up` cree la BD solo. Las claves, las bases de datos, los modelos y
-  cualquier otra foto están en el `.gitignore`. Ojo: quien tenga el repo tiene la
-  foto exacta con la que se inscribió cada persona (ver
+  cualquier otra foto están en el `.gitignore`. Ojo: el repositorio es público, así
+  que **cualquiera** tiene la foto exacta con la que se inscribió cada persona (ver
   [`THREAT_MODEL.md`](THREAT_MODEL.md), riesgos aceptados). Para crear la BD sin Docker:
 
 ```bash
@@ -1069,7 +1069,7 @@ equipo), pero el docente aclaró que son **50**: las **49** fotos que entregó
 
 **Limitaciones conocidas** (el detalle, con lo medido, en [`THREAT_MODEL.md`](THREAT_MODEL.md), riesgos aceptados):
 - **Sin detección de vivacidad:** una foto de una foto, o una imagen de una pantalla, se trata como una cara real.
-- **Las fotos de inscripción están en el repositorio** (`Dataset/`): quien lo tenga puede verificarse como cualquiera con su foto exacta.
+- **Las fotos de inscripción están en el repositorio, que es público** (`Dataset/`): cualquiera puede verificarse como cualquiera de las 50 personas con su foto exacta.
 - **Si el sistema se ejecuta en el ordenador del atacante**, la clave es suya: el cifrado, la firma de templates y el sello no le frenan.
 - **Rendimiento por grupos de población sin medir:** ArcFace viene entrenado por terceros; no se ha comprobado si falla más con unos grupos que con otros (`THREAT_MODEL.md`, riesgo 13).
 - **Gemelos no inscritos** (Aitana Etxebarria, James Phelps, Mary-Kate Olsen): el gemelo puede pasar por su hermano.

@@ -441,8 +441,10 @@ Los decimos nosotros antes de que los encuentre el equipo rival.
 8. **La primera muestra de una persona** no se comprueba con nada: si el admin
    inscribe a alguien con la foto equivocada, el sistema la cree.
 9. **Las fotos de inscripción están en el repositorio** (`Dataset/`). Se decidió así
-   para que `docker compose up` cree la BD sin pasos manuales; el repositorio es
-   privado y son fotos públicas de famosos, pero el rival las tiene. Con la foto
+   para que `docker compose up` cree la BD sin pasos manuales. El repositorio es
+   **público**, así que no solo el rival: **cualquiera** tiene la foto exacta con la que
+   se inscribió cada persona. Son fotos de famosos que ya circulan por internet, pero
+   el dato que importa es otro: el atacante tiene la muestra de referencia. Con la foto
    exacta de una persona, `verificar` da **1,00** (medido con las 49), y las
    variantes de esa foto también pasan. Mitigación posible, no implementada:
    rechazar las comparaciones casi idénticas (≥ 0,97–0,99) a una muestra guardada.
