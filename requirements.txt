@@ -1,0 +1,12 @@
+# Dependencias de ejecución (versiones fijadas para que todos, incluido el
+# grupo rival, obtengan exactamente el mismo comportamiento).
+# Objetivo: Python 3.11 (imagen Docker python:3.11-slim).
+#
+# numpy 2.4.x es la última serie con soporte para Python 3.11 (2.5 exige >=3.12).
+# OpenCV se queda en 4.x: cv2.FaceDetectorYN (YuNet) está probado en esta serie.
+# Se usa la versión COMPLETA (no headless) porque la demo de cámara necesita
+# cv2.imshow; no instales a la vez opencv-python y opencv-python-headless.
+numpy==2.4.6
+opencv-python==4.14.0.94
+PyYAML==6.0.3
+cryptography==50.0.2

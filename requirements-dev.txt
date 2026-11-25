@@ -1,0 +1,5 @@
+# Dependencias de desarrollo (tests). Incluye las de ejecución.
+-r requirements.txt
+pytest==9.1.1
+# Curvas DET/ROC/CMC de la evaluación (scripts); el sistema en ejecución no lo usa
+matplotlib==3.11.2

@@ -1,0 +1,74 @@
+# Configuración de la demo web JumeX Lens (python -m biometria.web).
+#
+# Desde que config.yaml es la configuración única, este fichero tiene los mismos
+# valores (misma BD, misma clave). Se mantiene para no romper los comandos
+# documentados con --config config_lens.yaml.
+#
+# Igual que config.yaml (extractor ArcFace y mismos umbrales) salvo:
+#   - BD propia en data/lens/ (las personas de la demo no se mezclan con data/bd.csv);
+#   - varias_caras: mayor y nitidez mínima 40, más permisivos para fotos de internet
+#     y de la cámara del portátil.
+#
+# Umbrales calibrados con scripts/evaluar.py sobre LFW (ver config.yaml):
+#   - verificación 0.35: FAR 0,0005 %, FRR 0,85 %;
+#   - identificación 0.40, algo más estricto: en 1:N se compara con todas las
+#     personas, así que la probabilidad de una coincidencia falsa crece con el
+#     tamaño de la BD (FAR 0,0005 %, FRR 1,0 %);
+#   - parecido 0.30: la web solo lista como "parecido" a quien lo supere.
+
+detector:
+  modelo: models/face_detection_yunet_2023mar.onnx
+  umbral_confianza: 0.8
+  umbral_nms: 0.3
+  varias_caras: mayor
+
+preprocesado:
+  tam_cara: [112, 112]      # ArcFace necesita exactamente 112x112
+
+calidad:
+  tam_min_cara: 60
+  umbral_borrosidad: 40.0
+
+extractor:
+  nombre: arcface
+  parametros:
+    modelo: models/arcface_w600k_r50.onnx
+    voltear: true
+
+bd:
+  ruta: data/lens/bd.csv
+  ruta_clave: ~/.jumex/clave_lens.key   # fuera de data/ (ver config.yaml)
+  cifrar_templates: true
+  anti_rollback: true
+  sello_estricto: true      # ver config.yaml
+  agregacion: max
+
+umbrales:
+  verificacion: 0.35
+  identificacion: 0.40
+  parecido: 0.30
+
+limites:
+  max_bytes_imagen: 10485760
+  max_pixeles: 25000000
+  max_muestras_por_id: 10
+
+defensa:
+  # Contramedidas frente a ataques (ver THREAT_MODEL.md). Se pueden poner a 0 para
+  # medir el sistema sin ellas o para no romper la interoperabilidad del enunciado.
+  coherencia_muestra: 0.35   # ver config.yaml (contra la PRIMERA muestra)
+  ancla_muestra: 0.20        # ver config.yaml
+  cara_duplicada: 0.60       # ver config.yaml
+  # Contra el ajuste automático de un template por los métodos _t (hill-climbing):
+  decimales_puntuacion_t: 2  # la puntuación que sale por _t se redondea a 2 decimales
+  max_intentos_t: 50         # máx. comparaciones _t por id en la ventana (0 = sin límite)
+  ventana_intentos_s: 60     # ventana del límite anterior, en segundos
+  # Paso 2 (estricto): los _t RECHAZAN templates sin firma válida de este sistema
+  # (fabricados, copiados de la BD o ajustados). `extraer` crea la firma (.sig).
+  exigir_firma_t: true
+  # Paso 4: en identificar, el 1.º debe sacar al 2.º al menos esto; si no, "ambiguo"
+  # -> desconocido. LFW (291 personas): 0 aciertos perdidos hasta 0.15.
+  margen_identificacion: 0.10
+  # Paso 5: los _sd comprueban que la imagen es una cara (LFW: 100 % de recortes
+  # legítimos aceptados; 100 % de ruido y 99 % de trozos de fondo rechazados).
+  cara_en_sd: true

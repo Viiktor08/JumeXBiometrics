@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JumeX Lens</title>
+  <meta name="description" content="Demo del sistema de reconocimiento facial JumeXBiometrics: verificar, identificar e inscribir personas a partir de una foto.">
+  <meta name="theme-color" content="#0b1f4d">
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap">
+  <link rel="stylesheet" href="/static/estilos.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="cabecera">
+    <div class="contenedor barra">
+      <a class="marca" href="/" aria-label="JumeX Lens, inicio">
+        <img src="/static/logo.svg" alt="" width="40" height="40">
+        <span>JumeX <strong>Lens</strong></span>
+      </a>
+      <div class="barra__derecha">
+        <div class="estado-sistema" id="estado-sistema" role="status">
+          <span class="punto"></span><span id="estado-texto">Conectando…</span>
+        </div>
+        <button class="rol rol--mas" id="boton-mas" hidden title="Añadir una persona (modo temporal)">
+          <svg class="rol__icono" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          <span id="mas-texto">Añadir</span>
+        </button>
+        <button class="rol" id="rol" aria-haspopup="dialog">
+          <svg class="rol__icono" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+          <span id="rol-texto">Usuario</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="contenedor heroe">
+      <h1>Reconocimiento facial, <span class="degradado">paso a paso</span></h1>
+      <p>Suelta una foto y mira cómo el sistema encuentra la cara, la convierte en números y la compara con la base de datos.</p>
+    </div>
+
+    <div class="contenedor">
+      <nav class="pestanas" role="tablist" aria-label="Modo">
+        <button class="pestana activa" role="tab" aria-selected="true" data-modo="verificar">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+          <span><b>Verificar</b><small>¿Es quien dice ser? · 1:1</small></span>
+        </button>
+        <button class="pestana" role="tab" aria-selected="false" data-modo="identificar">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+          <span><b>Identificar</b><small>¿Quién es? · 1:N</small></span>
+        </button>
+        <button class="pestana pestana--admin" role="tab" aria-selected="false" data-modo="inscribir" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10" cy="8" r="4"/><path d="M3 21a7 7 0 0 1 14 0M19 8v6M16 11h6"/></svg>
+          <span><b>Inscribir</b><small>Añadir a la base de datos</small></span>
+        </button>
+        <button class="pestana pestana--admin" role="tab" aria-selected="false" data-modo="bd" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+          <span><b>Base de datos</b><small id="pestana-bd-detalle">Personas inscritas</small></span>
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="contenedor">
+    <!-- Verificar / Identificar / Inscribir comparten esta vista -->
+    <section class="espacio" id="vista-operacion">
+      <div class="tarjeta entrada">
+        <div class="modo-intro">
+          <div class="modo-icono" id="modo-icono" aria-hidden="true"></div>
+          <div>
+            <p class="antetitulo" id="modo-antetitulo">Verificación 1:1</p>
+            <h2 id="modo-titulo">¿Es quien dice ser?</h2>
+            <p class="texto-suave" id="modo-descripcion"></p>
+          </div>
+        </div>
+
+        <div class="campo" id="campo-nombre">
+          <label for="nombre">Nombre de la persona</label>
+          <div class="campo__fila">
+            <img class="campo__avatar" id="nombre-avatar" alt="" hidden>
+            <input id="nombre" list="lista-nombres" autocomplete="off" spellcheck="false" maxlength="100" placeholder="Empieza a escribir… (p. ej. Jack Straw)">
+            <datalist id="lista-nombres"></datalist>
+          </div>
+          <p class="campo__ayuda" id="nombre-ayuda"></p>
+        </div>
+
+        <div class="zona" id="zona" tabindex="0" role="button" aria-describedby="zona-ayuda">
+          <div class="zona__vacia" id="zona-vacia">
+            <div class="zona__icono" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="11" r="3"/><path d="M7.5 17.5a5 5 0 0 1 9 0"/></svg>
+            </div>
+            <p class="zona__titulo" id="zona-titulo">Suelta tu foto para verificar</p>
+            <p class="zona__sub" id="zona-ayuda">o <u>haz clic para elegirla</u> · también puedes pegarla con Ctrl+V</p>
+            <span class="zona__o" aria-hidden="true">o bien</span>
+            <button type="button" class="boton boton--secundario zona__camara" id="boton-camara">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3.5"/></svg>
+              Hacer una foto con la cámara
+            </button>
+            <p class="zona__formatos">JPG o PNG · máx. 10 MB · una cara bien visible</p>
+          </div>
+          <div class="escenario" id="escenario" hidden>
+            <canvas id="lienzo"></canvas>
+            <div class="escenario__estado" id="escenario-estado"></div>
+          </div>
+          <input type="file" id="selector" accept="image/jpeg,image/png,image/webp,image/bmp" hidden>
+        </div>
+
+        <div class="acciones">
+          <button class="boton boton--principal" id="boton-ejecutar" hidden></button>
+          <button class="boton boton--principal" id="boton-usar" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+            Usar esta cara
+          </button>
+          <button class="boton boton--secundario" id="boton-manual" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><path d="M9 9h6v6H9z"/></svg>
+            ¿No es esa cara? Márcala a mano
+          </button>
+          <button class="boton boton--secundario" id="boton-cancelar" hidden>Cancelar</button>
+          <button class="boton boton--secundario" id="boton-otra" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/></svg>
+            Probar otra foto
+          </button>
+          <button class="boton boton--secundario" id="boton-otra-camara" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3.5"/></svg>
+            Otra con la cámara
+          </button>
+        </div>
+      </div>
+
+      <div class="columna-resultado">
+        <ol class="tarjeta pipeline" id="pipeline" aria-label="Pasos del sistema">
+          <li class="paso" data-paso="carga">
+            <span class="paso__icono"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-8 8"/></svg></span>
+            <div class="paso__cuerpo"><b>Foto recibida</b><span class="paso__detalle">Se valida tamaño y formato</span></div>
+            <span class="paso__tiempo"></span>
+          </li>
+          <li class="paso" data-paso="deteccion">
+            <span class="paso__icono"><svg viewBox="0 0 24 24"><path d="M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="3"/></svg></span>
+            <div class="paso__cuerpo"><b>Detección de caras</b><span class="paso__detalle">Red YuNet: cajas y 5 puntos clave</span></div>
+            <span class="paso__tiempo"></span>
+          </li>
+          <li class="paso" data-paso="alineado">
+            <span class="paso__icono"><svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18"/><circle cx="12" cy="12" r="8"/></svg></span>
+            <div class="paso__cuerpo"><b>Alineado y calidad</b><span class="paso__detalle">Ojos horizontales, 112×112, nitidez</span></div>
+            <img class="paso__miniatura" alt="Cara alineada que recibe el extractor" hidden>
+            <span class="paso__tiempo"></span>
+          </li>
+          <li class="paso" data-paso="extraccion">
+            <span class="paso__icono"><svg viewBox="0 0 24 24"><path d="M4 18V9M8 18V5M12 18v-7M16 18V7M20 18v-4"/></svg></span>
+            <div class="paso__cuerpo"><b>Template</b><span class="paso__detalle">La cara convertida en números</span><canvas class="paso__codigo" hidden></canvas></div>
+            <span class="paso__tiempo"></span>
+          </li>
+          <li class="paso" data-paso="comparacion">
+            <span class="paso__icono"><svg viewBox="0 0 24 24"><path d="M7 7h10M7 7l3-3M7 7l3 3M17 17H7M17 17l-3-3M17 17l-3 3"/></svg></span>
+            <div class="paso__cuerpo"><b id="paso-comparacion-titulo">Comparación</b><span class="paso__detalle" id="paso-comparacion-detalle">Con la base de datos</span></div>
+            <span class="paso__tiempo"></span>
+          </li>
+        </ol>
+
+        <div class="tarjeta resultado" id="resultado" aria-live="polite">
+          <div class="resultado__vacio">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l2.5 2.5"/></svg>
+            <p>El resultado aparecerá aquí</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Base de datos -->
+    <section class="vista-bd" id="vista-bd" hidden>
+      <div class="bd-cabecera">
+        <div>
+          <p class="antetitulo">Base de datos</p>
+          <h2>Personas inscritas</h2>
+          <p class="texto-suave">Cada tarjeta es una persona. El sistema no compara con estas fotos: guarda un <b>template</b> (una lista de números) firmado con HMAC. La foto es solo para que tú la veas.</p>
+        </div>
+        <div class="bd-herramientas">
+          <div class="insignias" id="bd-insignias"></div>
+          <label class="buscador">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+            <input type="search" id="buscador" placeholder="Buscar por nombre" aria-label="Buscar por nombre">
+          </label>
+        </div>
+      </div>
+      <div class="rejilla-bd" id="rejilla-bd"></div>
+      <p class="bd-vacia" id="bd-vacia" hidden></p>
+    </section>
+
+    <section class="como-funciona" aria-labelledby="como-titulo">
+      <p class="antetitulo">Bajo el capó</p>
+      <h2 id="como-titulo">¿Cómo funciona?</h2>
+      <div class="pasos-explicados">
+        <article>
+          <span class="numero">1</span>
+          <h3>Encontrar la cara</h3>
+          <p>Una red neuronal (YuNet) busca caras en la foto y marca 5 puntos: ojos, nariz y comisuras de la boca. Si hay varias, se queda con la más grande.</p>
+        </article>
+        <article>
+          <span class="numero">2</span>
+          <h3>Ponerla recta</h3>
+          <p>Con esos 5 puntos se gira y escala la cara para que los ojos queden siempre en el mismo sitio, en un recorte de 112×112. Si está borrosa o es muy pequeña, se rechaza.</p>
+        </article>
+        <article>
+          <span class="numero">3</span>
+          <h3>Convertirla en números</h3>
+          <p>Una red ArcFace (ResNet-50 entrenada con 600 000 personas) transforma la cara en un <b>template</b>: 512 números que resumen sus rasgos. Es lo único que se guarda en la base de datos.</p>
+        </article>
+        <article>
+          <span class="numero">4</span>
+          <h3>Comparar y decidir</h3>
+          <p>Se mide la similitud (0–100 %) entre templates: dos desconocidos suelen quedar por debajo del 15 % y la misma persona por encima del 40 %. Si supera el <b>umbral</b>, el sistema dice "sí".</p>
+        </article>
+      </div>
+      <div class="diferencias">
+        <div><b>Verificar (1:1)</b><p>Tú dices quién eres y el sistema compara solo con esa persona. Responde sí o no.</p></div>
+        <div><b>Identificar (1:N)</b><p>No dices nada: el sistema compara con todos y responde quién eres, o que no te conoce.</p></div>
+        <div><b>Inscribir</b><p>Añade a alguien a la base de datos. Se pueden guardar varias fotos (muestras) de la misma persona.</p></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="pie">
+    <div class="contenedor">
+      <span><b>JumeX Lens</b> · demo de JumeXBiometrics · Sistemas Biométricos, Universidad de Málaga</span>
+      <span id="pie-extractor"></span>
+    </div>
+  </footer>
+
+  <dialog class="ficha" id="ficha" aria-labelledby="ficha-nombre">
+    <div class="ficha__contenido" id="ficha-contenido"></div>
+    <input type="file" id="selector-ficha" accept="image/jpeg,image/png,image/webp,image/bmp" hidden>
+  </dialog>
+
+  <dialog class="camara" id="camara" aria-labelledby="camara-titulo">
+    <div class="camara__contenido">
+      <header class="camara__cabecera">
+        <div>
+          <p class="antetitulo">Cámara</p>
+          <h2 id="camara-titulo">Hazte una foto</h2>
+        </div>
+        <button class="ficha__cerrar" id="camara-cerrar" aria-label="Cerrar la cámara">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </header>
+      <div class="camara__visor" id="camara-visor">
+        <video id="camara-video" autoplay playsinline muted></video>
+        <canvas id="camara-foto" hidden></canvas>
+        <div class="camara__guia" aria-hidden="true"></div>
+        <div class="camara__flash" id="camara-flash" aria-hidden="true"></div>
+        <p class="camara__estado" id="camara-estado" role="status"></p>
+      </div>
+      <p class="texto-suave camara__ayuda" id="camara-ayuda">Mira de frente, con buena luz y la cara dentro del óvalo. La foto no sale de este equipo salvo para analizarla.</p>
+      <div class="acciones camara__acciones">
+        <button class="boton boton--principal" id="camara-disparar" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3.5"/></svg>
+          Hacer la foto
+        </button>
+        <button class="boton boton--principal" id="camara-usar" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+          Usar esta foto
+        </button>
+        <button class="boton boton--secundario" id="camara-repetir" hidden>Repetir</button>
+        <button class="boton boton--secundario" id="camara-cambiar" hidden>Cambiar de cámara</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog class="login" id="login" aria-labelledby="login-titulo">
+    <form class="login__contenido" id="login-form" method="dialog">
+      <header class="login__cabecera">
+        <div>
+          <p class="antetitulo">Acceso</p>
+          <h2 id="login-titulo">Entrar como administrador</h2>
+        </div>
+        <button type="button" class="ficha__cerrar" id="login-cerrar" aria-label="Cerrar">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+        </button>
+      </header>
+      <p class="texto-suave login__ayuda">El administrador puede inscribir, ver la base de datos y borrar. Sin PIN, se usa el modo usuario (solo verificar e identificar).</p>
+      <label class="login__campo" for="login-pin">PIN de administrador</label>
+      <input id="login-pin" type="password" inputmode="numeric" autocomplete="off" placeholder="••••" maxlength="64">
+      <p class="login__error" id="login-error" hidden></p>
+      <div class="acciones">
+        <button type="submit" class="boton boton--principal" id="login-entrar">Entrar</button>
+        <button type="button" class="boton boton--secundario" id="login-cancelar">Cancelar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="notificacion" id="aviso" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

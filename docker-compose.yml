@@ -1,0 +1,69 @@
+# JumeX Lens (la web) en Docker. Un solo comando:
+#
+#   docker compose up --build                                   # solo en este equipo
+#   docker compose --profile publico up --build web-publico     # además, URL pública
+#
+# - En este equipo: http://localhost:8000
+# - Con el perfil "publico": además una URL https://….trycloudflare.com que sale en el
+#   log (cambia en cada arranque y solo funciona mientras el contenedor esté levantado).
+#   Cualquiera con la URL puede verificar e identificar: úsalo solo cuando haga falta.
+# - Ctrl+C lo para (o `docker compose down` si se lanzó con -d).
+# - La CLI, dentro del contenedor y con la misma BD:
+#     docker compose exec web python -m biometria verificar --id "Keanu Reeves" --foto Dataset/keanu_reeves_2021.png
+# - Los tests (imagen aparte, con pytest):
+#     docker compose --profile pruebas run --rm pruebas
+#
+# Nada secreto viaja con el repositorio:
+# - La primera vez se crea la BD (data/lens/) con las fotos de Dataset/ y una clave
+#   maestra ALEATORIA en ~/.jumex de ESTE ordenador (ver scripts/arrancar_web.py).
+# - El PIN de administrador se genera aleatorio en cada arranque y sale en el log
+#   (o se fija con BIOMETRIA_ADMIN_PASS en un fichero .env, ver env.ejemplo).
+
+x-web: &web
+  build:
+    context: .
+    target: final          # sin dependencias de desarrollo (ver Dockerfile)
+  image: jumex-biometrics
+  entrypoint: ["python", "scripts/arrancar_web.py"]
+  environment:
+    BIOMETRIA_ADMIN_PASS: ${BIOMETRIA_ADMIN_PASS:-}
+  ports:
+    # Solo en 127.0.0.1 del equipo: desde la red local no se entra
+    - "127.0.0.1:${PUERTO:-8000}:8000"
+  volumes:
+    - ./data:/app/data
+    - ./Dataset:/app/Dataset:ro
+    # Clave maestra: fuera del repo y de data/. HOME en macOS/Linux, USERPROFILE en Windows
+    - ${HOME:-${USERPROFILE}}/.jumex:/home/biometria/.jumex
+  restart: unless-stopped
+
+services:
+  web:
+    <<: *web
+    command: ["--host", "0.0.0.0", "--puerto", "8000", "--no-abrir"]
+
+  # Igual que `web` pero publicada en internet con un túnel de Cloudflare.
+  # No arranca con `docker compose up`: hay que pedirla con --profile publico.
+  web-publico:
+    <<: *web
+    profiles: ["publico"]
+    command: ["--host", "0.0.0.0", "--puerto", "8000", "--no-abrir", "--tunel"]
+
+  # Tests y scripts de evaluación (pytest y matplotlib). No arranca con `docker compose up`.
+  #   docker compose --profile pruebas run --rm pruebas
+  #   docker compose --profile pruebas run --rm --entrypoint python pruebas scripts/evaluar.py --tabla
+  #   docker compose --profile pruebas run --rm --entrypoint python pruebas scripts/graficas.py
+  #     (curvas DET/ROC/CMC y fotos nuevas de Messi -> docs/graficas/; ver docs/EVALUACION.md)
+  pruebas:
+    build:
+      context: .
+      target: pruebas
+    image: jumex-biometrics-pruebas
+    profiles: ["pruebas"]
+    volumes:
+      # Solo lectura salvo docs/graficas, donde graficas.py deja las figuras.
+      # LFW se descarga una vez (unos 180 MB) a ~/.cache/jumex y se reutiliza.
+      - ./Dataset:/app/Dataset:ro
+      - ./fotos_prueba:/app/fotos_prueba:ro
+      - ./docs/graficas:/app/docs/graficas
+      - ${HOME:-${USERPROFILE}}/.cache/jumex:/home/biometria/.cache/jumex

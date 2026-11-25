@@ -1,0 +1,86 @@
+# Configuración del sistema biométrico JumeXBiometrics.
+#
+# Las rutas relativas se resuelven respecto a la carpeta de ESTE fichero.
+# Se puede usar otro fichero con la variable de entorno BIOMETRIA_CONFIG.
+#
+# Es la configuración ÚNICA del sistema: la CLI, el Docker y la web (JumeX Lens)
+# usan la misma base de datos (data/lens/bd.csv, la que crea `docker compose up`
+# con las fotos de Dataset/) y la misma clave. config_lens.yaml se mantiene por
+# compatibilidad y tiene los mismos valores.
+#
+# Los umbrales están calibrados para ArcFace con scripts/evaluar.py sobre LFW
+# (392 personas, 1173 pares genuinos y 615 432 impostores; EER 0,68 % en 0.158).
+# Si se cambia de extractor HAY QUE RECALIBRARLOS: cada técnica puntúa distinto.
+
+detector:
+  modelo: models/face_detection_yunet_2023mar.onnx
+  umbral_confianza: 0.8   # puntuación mínima de YuNet para aceptar una cara
+  umbral_nms: 0.3         # supresión de no-máximos entre detecciones solapadas
+  varias_caras: mayor     # "error" -> rechaza la foto | "mayor" -> usa la cara más grande
+                          # ("mayor": algunas fotos del Dataset tienen más de una cara)
+
+preprocesado:
+  tam_cara: [112, 112]    # [ancho, alto] de la cara alineada que recibe el extractor
+
+calidad:
+  tam_min_cara: 60          # lado mínimo (px) de la caja de la cara en la imagen original
+  umbral_borrosidad: 40.0   # varianza del Laplaciano mínima sobre la cara alineada
+
+extractor:
+  nombre: arcface         # extractor registrado en biometria/extractores: arcface (el asignado), sface, lbp
+  parametros:             # se pasan tal cual al constructor del extractor
+    modelo: models/arcface_w600k_r50.onnx
+    voltear: true         # suma el vector de la cara volteada (más robusto, el doble de lento)
+
+bd:
+  ruta: data/lens/bd.csv  # la BD que crea `docker compose up` con Dataset/
+  # Clave maestra (HMAC, cifrado, firma de templates y sello). Tiene prioridad la
+  # variable de entorno BIOMETRIA_HMAC_KEY; si no, este fichero. Va FUERA de data/ y
+  # del repositorio: quien pueda leer o escribir la BD no debe poder leer la clave.
+  ruta_clave: ~/.jumex/clave_lens.key
+  cifrar_templates: true    # templates cifrados con AES-GCM: leer el CSV no da los vectores
+  anti_rollback: true       # sello junto a la clave: detecta volver a una BD antigua o borrarla
+  sello_estricto: true      # si falta el sello de una BD que existe: error (python -m biometria sellar
+                            # la acepta a propósito). Sin esto, borrar el sello colaba un rollback.
+  agregacion: max           # cómo combinar varias muestras de una persona: max | media
+
+umbrales:
+  verificacion: 0.35        # mínimo para aceptar en verificar*  (LFW: FAR 0,0005 %, FRR 0,85 %)
+  identificacion: 0.40      # mínimo para no devolver "desconocido" (LFW: FAR 0,0005 %, FRR 1,0 %)
+  # Solo para mostrar (web): por debajo, un candidato "no se parece" y no se lista
+  # entre los más parecidos. Dos desconocidos lo superan en el 0,0018 % de los pares
+  # (y con 392 personas en la BD, el 2.º candidato de un inscrito solo en el 1 % de casos).
+  parecido: 0.30
+
+limites:
+  max_bytes_imagen: 10485760   # 10 MiB: fichero de imagen máximo aceptado
+  max_pixeles: 25000000        # 25 Mpx: protege frente a "bombas" de descompresión
+  max_muestras_por_id: 10      # muestras máximas por persona en la BD
+
+defensa:
+  # Contramedidas frente a ataques (ver THREAT_MODEL.md). Se pueden poner a 0 para
+  # medir el sistema sin ellas o para no romper la interoperabilidad del enunciado.
+  coherencia_muestra: 0.35   # al AÑADIR una muestra a alguien que ya existe, debe
+                             # parecerse a su PRIMERA muestra tanto como para verificarse
+                             # (mismo umbral que verificación; LFW: FRR 0,22-0,85 %).
+                             # Antes 0.20 contra la más parecida: la deriva con morphs
+                             # colaba al atacante. 0 = desactivado.
+  ancla_muestra: 0.20        # al verificar/identificar, las muestras extra solo cuentan
+                             # si la foto se parece al menos esto a la PRIMERA muestra
+                             # (LFW: el 0,12 % de impostores llega). 0 = desactivado.
+  cara_duplicada: 0.60       # al crear una persona NUEVA, si su cara se parece al menos esto
+                             # a alguien inscrito: cara_ya_inscrita (misma cara, otro nombre).
+                             # Entre las 50 del Dataset el máximo es 0,25. 0 = desactivado.
+  # Contra el ajuste automático de un template por los métodos _t (hill-climbing):
+  decimales_puntuacion_t: 2  # la puntuación que sale por _t se redondea a 2 decimales
+  max_intentos_t: 50         # máx. comparaciones _t por id en la ventana (0 = sin límite)
+  ventana_intentos_s: 60     # ventana del límite anterior, en segundos
+  # Paso 2 (estricto): los _t RECHAZAN templates sin firma válida de este sistema
+  # (fabricados, copiados de la BD o ajustados). `extraer` crea la firma (.sig).
+  exigir_firma_t: true
+  # Paso 4: en identificar, el 1.º debe sacar al 2.º al menos esto; si no, "ambiguo"
+  # -> desconocido. LFW (291 personas): 0 aciertos perdidos hasta 0.15.
+  margen_identificacion: 0.10
+  # Paso 5: los _sd comprueban que la imagen es una cara (LFW: 100 % de recortes
+  # legítimos aceptados; 100 % de ruido y 99 % de trozos de fondo rechazados).
+  cara_en_sd: true
