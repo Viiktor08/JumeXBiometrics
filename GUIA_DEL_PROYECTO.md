@@ -36,7 +36,7 @@ cree la base de datos solo. Lo más fácil es no instalar nada y usar Docker
 ```bash
 # 1) Clonar FUERA de OneDrive/iCloud/Dropbox (rompen la carpeta .git)
 mkdir -p ~/dev && cd ~/dev
-git clone -b FINAL https://github.com/Viiktor08/JumeXBiometrics.git
+git clone -b main https://github.com/Viiktor08/JumeXBiometrics.git
 cd JumeXBiometrics
 
 # 2) Entorno virtual (también fuera de carpetas sincronizadas)
@@ -65,7 +65,7 @@ La **clave** de la base de datos y el **sello** anti-rollback se crean solos en
 
 ```bash
 cd ~/dev/JumeXBiometrics
-git switch FINAL && git pull
+git switch main && git pull
 source ~/.venvs/jumex/bin/activate
 pip install -r requirements-dev.txt         # por si cambian dependencias
 python scripts/descargar_modelos.py         # solo baja lo que falte
@@ -377,8 +377,22 @@ documentados en `THREAT_MODEL.md`:
 - **"¿Y si el atacante lee la base de datos?"** Ve vectores cifrados. Aunque los
   descifrara, no podría usarlos en `_t` porque no están firmados.
 - **"¿Y si la modifica?"** La firma por fila lo detecta; si pone una copia antigua,
-  el sello; si la borra, también el sello. Para falsificarla necesita la clave,
-  que no está en `data/`.
+  el sello; si la borra, también el sello; y si además borra el sello, el sistema
+  se niega a usar la BD hasta que el admin la acepte con `sellar`. Para falsificarla
+  necesita la clave, que no está en `data/`.
+- **"¿Y si ejecutáis el sistema en vuestro ordenador?"** Entonces la clave es
+  vuestra y el cifrado, la firma y el sello no os frenan: lo explicamos en
+  `THREAT_MODEL.md`, "Dos escenarios". Ahí solo cuentan las defensas que no dependen
+  de un secreto (coherencia y ancla de las muestras, duplicados, margen de gemelos,
+  cara en `_sd`, validación de entradas).
+- **"¿Por qué 50 personas y no 51?"** El docente aclaró que eran sus 49 fotos más
+  una elegida por cada equipo. La nuestra es Lionel Messi.
+- **"¿Cuánto acierta con vuestras fotos?"** Con la foto de inscripción, en JPEG de
+  baja calidad, en espejo, girada, con otra luz o en gris, siempre por encima de
+  0,77; con los ojos tapados, 0,48 o más. Entre las 50 personas, el impostor más
+  parecido da 0,25. Y con **10 fotos nuevas de Messi** que nunca se inscribieron
+  (de 2007 a 2022), lo reconoce en todas (0,57–0,75), mientras que nadie más pasa de
+  0,14. Todo en `docs/EVALUACION.md`.
 - **"¿Qué pasa con los gemelos?"** Ver 5.3, punto 1: lo sabemos, lo medimos y
   explicamos por qué no tiene solución con este tipo de sistema.
 - **"¿Cómo sé qué protecciones están activas?"**

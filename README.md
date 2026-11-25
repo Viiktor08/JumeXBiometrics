@@ -28,7 +28,7 @@ Para cualquier grupo, en cualquier ordenador. Solo hace falta **Docker** (Docker
 Desktop en Windows/macOS, u OrbStack en macOS) y **git**.
 
 ```bash
-git clone -b FINAL https://github.com/Viiktor08/JumeXBiometrics.git
+git clone -b main https://github.com/Viiktor08/JumeXBiometrics.git
 cd JumeXBiometrics
 docker compose up --build
 ```
@@ -181,7 +181,7 @@ cámara sí funciona porque la usa el navegador).
 ### Para el equipo: clonar y empezar
 
 ```bash
-git clone -b FINAL https://github.com/Viiktor08/JumeXBiometrics.git
+git clone -b main https://github.com/Viiktor08/JumeXBiometrics.git
 cd JumeXBiometrics
 python3 -m venv ~/.venvs/jumex && source ~/.venvs/jumex/bin/activate
 pip install -r requirements-dev.txt
@@ -218,22 +218,19 @@ python -m biometria.web --admin-pass TU_PIN_LARGO                   # http://127
 
 ### Probarlo en 5 minutos
 
-```bash
-# 1) Un conjunto de caras reales para probar: 50 personas de LFW
-python scripts/preparar_lfw.py                              # data/lfw/fotos/*.jpg y data/lfw/personas.csv
-
-# 2) Inscribirlas (extractor ArcFace) en la base de datos de la web (data/lens/)
-python scripts/inscribir_csv.py data/lfw/personas.csv --config config_lens.yaml
-
-# 3) Abrir la web
-python -m biometria.web                                     # http://127.0.0.1:8000
-```
-
-O sin web, por línea de comandos:
+Con Docker, la BD de la entrega (las 50 personas de `Dataset/`) se crea sola:
 
 ```bash
-python -m biometria --config config_lens.yaml identificar --foto data/lfw/fotos/Jack_Straw.jpg
+docker compose up --build -d                                            # web en http://localhost:8000
+docker compose exec web python -m biometria bd                          # las 50 personas y sus ids
+docker compose exec web python -m biometria verificar --id "lionel messi" --foto Dataset/lionel_messi_2022.jpg
+# {"operacion": "verificar", "id": "Lionel Messi", "aceptado": true, "puntuacion": 1.0, "umbral": 0.35, "fiable": null}
+docker compose exec web python -m biometria identificar --foto Dataset/adele_2016.jpg
 ```
+
+> **No inscribas otras personas (por ejemplo, de LFW) en `data/lens/`**: es la BD de
+> la entrega y debe tener exactamente las 50 personas de `Dataset/`. Para medir el
+> sistema con muchas caras está `scripts/evaluar.py`, que no toca ninguna BD.
 
 ---
 
@@ -616,7 +613,10 @@ Con ArcFace, según el umbral:
   probablemente un error de etiquetado de LFW (el impostor máximo, 0,91, tiene
   pinta de ser la misma persona con dos nombres). Con más datos pueden cambiar.
 - Los umbrales se eligieron **sobre los mismos datos** con los que se miden, así
-  que las cifras son algo optimistas. Hay que confirmarlas con las 50 fotos del profesor.
+  que estas cifras son algo optimistas. Por eso se repitió **con calibración y test
+  separados** (personas distintas): en test, EER 0,44 % y, con 0,35, FAR 0,0011 % y
+  FRR 0,65 %. Además, **10 fotos nuevas de Messi** (2007–2022) se reconocen todas
+  (0,57–0,75). Curvas y detalle en [`docs/EVALUACION.md`](docs/EVALUACION.md).
 - LFW son fotos de internet con mucha variación de pose y luz. Con fotos de la
   cámara (frontales y bien iluminadas) las puntuaciones genuinas suelen ser más altas.
 - LBP (EER ≈ 37 %, rank-1 11 %) distingue muy poco; queda solo como línea base.
@@ -650,22 +650,24 @@ web y el Docker** (`data/lens/bd.csv`, con la clave `~/.jumex/clave_lens.key`).
 Cada comando imprime **una línea JSON** y devuelve un código de salida: `0` si la
 operación se ha ejecutado (una verificación rechazada también da 0: mira
 `aceptado`), `1` si hay un error controlado y `2` si faltan argumentos. Salidas
-reales (extractor ArcFace):
+reales con el extractor ArcFace, de una prueba con personas de LFW inscritas en una
+BD de pruebas (con la BD de la entrega, usa las fotos de `Dataset/` y los ids de
+`python -m biometria bd`; las respuestas actuales añaden el campo `fiable`):
 
 ```bash
-python -m biometria --config config_lens.yaml verificar --id "Jack Straw" --foto data/lfw/pruebas/inscritos/Jack_Straw_0002.jpg
+python -m biometria verificar --id "Jack Straw" --foto data/lfw/pruebas/inscritos/Jack_Straw_0002.jpg
 # {"operacion": "verificar", "id": "Jack Straw", "aceptado": true, "puntuacion": 0.7147, "umbral": 0.35}
 
-python -m biometria --config config_lens.yaml verificar --id "Jack Straw" --foto data/lfw/pruebas/inscritos/Marc_Grossman_0002.jpg
+python -m biometria verificar --id "Jack Straw" --foto data/lfw/pruebas/inscritos/Marc_Grossman_0002.jpg
 # {"operacion": "verificar", "id": "Jack Straw", "aceptado": false, "puntuacion": 0.0, "umbral": 0.35}
 
-python -m biometria --config config_lens.yaml identificar --foto data/lfw/pruebas/inscritos/Allyson_Felix_0003.jpg
+python -m biometria identificar --foto data/lfw/pruebas/inscritos/Allyson_Felix_0003.jpg
 # {"operacion": "identificar", "identificado": true, "id": "Allyson Felix", "puntuacion": 0.5552, "umbral": 0.4}
 
-python -m biometria --config config_lens.yaml identificar --foto data/lfw/pruebas/desconocidos/Colin_Powell_0002.jpg
+python -m biometria identificar --foto data/lfw/pruebas/desconocidos/Colin_Powell_0002.jpg
 # {"operacion": "identificar", "identificado": false, "id": null, "puntuacion": 0.1353, "umbral": 0.4}
 
-python -m biometria --config config_lens.yaml verificar --id "Nadie" --foto data/fotos/ana.jpg
+python -m biometria verificar --id "Nadie" --foto data/fotos/ana.jpg
 # {"error": "id_no_inscrito", "mensaje": "'Nadie' no está inscrito"}      (código de salida 1)
 
 python -m biometria inscribir --id "Ana López" --foto data/fotos/ana.jpg
@@ -750,9 +752,9 @@ escaneo. Usa [`config_lens.yaml`](config_lens.yaml), que tiene los mismos valore
 `config.yaml`: extractor **ArcFace** y la misma base de datos (`data/lens/`) que la CLI.
 
 ```bash
-python scripts/descargar_modelos.py
-python scripts/inscribir_csv.py data/lfw/personas.csv --config config_lens.yaml   # cargar 50 personas (la primera vez)
-python -m biometria.web                                                          # http://127.0.0.1:8000
+docker compose up --build                                   # lo más fácil: crea la BD con Dataset/ la primera vez
+python scripts/arrancar_web.py                              # lo mismo sin Docker (tras descargar_modelos.py)
+python -m biometria.web                                     # solo la web, con la BD que ya haya: http://127.0.0.1:8000
 ```
 
 **Qué se puede hacer** (cuatro pestañas):
@@ -940,8 +942,9 @@ configuración se **valida**: un valor fuera de rango da un error claro
 
 `config_lens.yaml` tiene los mismos valores (se mantiene para no romper los
 comandos con `--config config_lens.yaml`). **Los umbrales están
-calibrados con LFW** (ver [Cuánto acierta](#cuánto-acierta)) y conviene
-confirmarlos con las fotos del profesor. **Si se cambia de extractor hay que
+calibrados con LFW** (ver [Cuánto acierta](#cuánto-acierta)); con las fotos de la
+práctica, el impostor más parecido entre las 50 personas da 0,25, lejos de 0,35.
+**Si se cambia de extractor hay que
 recalibrarlos**: cada técnica puntúa en una escala distinta.
 
 **Variables de entorno:** `BIOMETRIA_CONFIG` (fichero de configuración) y
