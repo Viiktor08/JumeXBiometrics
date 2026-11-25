@@ -5,7 +5,7 @@ reconocimiento y comportamiento ante los ataques que pide el enunciado (el ataca
 se salta partes del sistema, lee la base de datos o escribe en ella). Pensado para
 copiarlo a la memoria.
 
-- **Fechas:** 23 y 24/11/2026, rama `FINAL`.
+- **Fechas:** 23 y 24/11/2026 (código de la entrega, rama `main`).
 - **Entorno:** el contenedor Docker del proyecto (Python 3.11.18, numpy 2.4.6, OpenCV 4.14.0) en un MacBook Pro M5.
 - **Ficheros con los resultados en bruto:** `resultados/revision-2026-11/` (fuera de git).
 - **Cómo repetirlo:** al final del documento.
